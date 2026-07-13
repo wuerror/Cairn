@@ -19,7 +19,7 @@ from cairn.dispatcher.tasks.common import (
     run_healthcheck,
     run_worker_process,
     task_healthcheck_enabled,
-    write_conclude_result,
+    write_conclude_result_with_observations,
     write_graph_snapshot_reference,
 )
 from cairn.dispatcher.workers.registry import get_driver
@@ -153,7 +153,7 @@ def run_explore_task(
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 payload = parse_json_output(model_output)
-                kind, description = validate_explore_payload(payload)
+                kind, observations = validate_explore_payload(payload)
             except Exception as exc:
                 LOG.warning(
                     "explore parse failed project=%s intent=%s worker=%s error=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -192,12 +192,12 @@ def run_explore_task(
                 )
                 best_effort_release(client, project.project.id, intent.id, worker.name)
                 return "rejected"
-            return write_conclude_result(
+            return write_conclude_result_with_observations(
                 client,
                 project.project.id,
                 intent.id,
                 worker.name,
-                description,
+                observations,
                 source="explore_execute",
                 phase_ms=execute_ms,
                 total_ms=int((time.perf_counter() - task_started) * 1000),
@@ -358,7 +358,7 @@ def _try_conclude_fallback(
     try:
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
-        kind, description = validate_explore_payload(payload)
+        kind, observations = validate_explore_payload(payload)
     except Exception as exc:
         LOG.warning(
             "conclude parse failed project=%s intent=%s worker=%s error=%s conclude_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -383,12 +383,12 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project_id, intent.id, worker.name)
         return "rejected"
-    return write_conclude_result(
+    return write_conclude_result_with_observations(
         client,
         project_id,
         intent.id,
         worker.name,
-        description,
+        observations,
         source="explore_conclude",
         phase_ms=conclude_ms,
     )

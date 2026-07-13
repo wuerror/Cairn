@@ -1,14 +1,166 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from cairn.server.models import Intent, ProjectMeta, ProjectReason
+from cairn.server.models import ConfidenceLevel, Fact, FactType, Intent, Observation, ProjectMeta, ProjectReason
+
+CONFIDENCE_LEVEL_ORDER: dict[ConfidenceLevel, int] = {
+    "hypothesized": 0,
+    "static-confirmed": 1,
+    "reachable-confirmed": 2,
+    "poc-confirmed": 3,
+    "refuted": -1,
+}
+
+AUDIT_MAX_CONFIDENCE: ConfidenceLevel = "static-confirmed"
+VERIFICATION_CONFIDENCE_LEVELS: set[ConfidenceLevel] = {
+    "reachable-confirmed",
+    "poc-confirmed",
+    "refuted",
+}
+
+RESERVED_FACT_IDS = {"origin", "goal"}
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def compute_code_version(locations: list[str] | None, origin_description: str | None = None) -> str:
+    if locations:
+        payload = json.dumps(sorted(locations), sort_keys=True)
+    elif origin_description:
+        try:
+            origin = json.loads(origin_description)
+            commit = origin.get("codebase", {}).get("commit")
+            if commit:
+                return str(commit)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        payload = origin_description
+    else:
+        payload = utcnow()
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
+def canonical_fact_key(fact_type: str | None, locations: list[str] | None) -> str:
+    loc_key = json.dumps(sorted(locations)) if locations else "[]"
+    return f"{fact_type or ''}:{loc_key}"
+
+
+def effective_confidence(
+    conn: sqlite3.Connection,
+    project_id: str,
+    own_confidence: ConfidenceLevel | None,
+    own_code_version: str | None,
+    own_type: str | None,
+    fact_id: str | None = None,
+) -> tuple[ConfidenceLevel | None, bool]:
+    if fact_id is None:
+        return own_confidence, False
+    if own_type == "verification":
+        return own_confidence, False
+    verifications = conn.execute(
+        """SELECT confidence, code_version, rowid FROM facts
+           WHERE project_id = ? AND verifies = ? AND type = 'verification'
+           ORDER BY rowid DESC""",
+        (project_id, fact_id),
+    ).fetchall()
+    if not verifications:
+        return own_confidence, False
+    latest = verifications[0]
+    v_conf = latest["confidence"]
+    if v_conf == "refuted":
+        return "refuted", False
+    if latest["code_version"] and own_code_version and latest["code_version"] != own_code_version:
+        return own_confidence, True
+    return v_conf, False
+
+
+def gate_confidence(fact_type: str | None, confidence: ConfidenceLevel | None) -> None:
+    if confidence is None:
+        return
+    if fact_type == "verification":
+        if confidence not in VERIFICATION_CONFIDENCE_LEVELS:
+            raise HTTPException(400, f"Verification fact confidence must be one of: {sorted(VERIFICATION_CONFIDENCE_LEVELS)}")
+        return
+    if confidence in VERIFICATION_CONFIDENCE_LEVELS:
+        raise HTTPException(400, f"Audit-side facts cannot claim {confidence}; max is {AUDIT_MAX_CONFIDENCE}")
+
+
+def find_existing_fact(
+    conn: sqlite3.Connection,
+    project_id: str,
+    fact_type: str | None,
+    locations: list[str] | None,
+) -> sqlite3.Row | None:
+    if fact_type == "verification" or (fact_type is None and locations is None):
+        return None
+    key = canonical_fact_key(fact_type, locations)
+    rows = conn.execute(
+        "SELECT * FROM facts WHERE project_id = ? AND type IS NOT NULL",
+        (project_id,),
+    ).fetchall()
+    for row in rows:
+        existing_key = canonical_fact_key(row["type"], parse_json_list(row["locations"]))
+        if existing_key == key and row["id"] not in RESERVED_FACT_IDS:
+            return row
+    return None
+
+
+def merge_locations(existing: list[str] | None, incoming: list[str] | None) -> str | None:
+    merged = set()
+    if existing:
+        merged.update(existing)
+    if incoming:
+        merged.update(incoming)
+    if not merged:
+        return None
+    return json.dumps(sorted(merged))
+
+
+def parse_json_list(value: str | None) -> list[str] | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
+def fact_from_row(row: sqlite3.Row, conn: sqlite3.Connection | None = None, project_id: str | None = None) -> Fact:
+    eff_conf = None
+    stale = False
+    if conn is not None and project_id is not None and row["type"] is not None and row["type"] != "verification":
+        eff_conf, stale = effective_confidence(
+            conn, project_id,
+            own_confidence=row["confidence"],
+            own_code_version=row["code_version"],
+            own_type=row["type"],
+            fact_id=row["id"],
+        )
+    return Fact(
+        id=row["id"],
+        description=row["description"],
+        type=row["type"],
+        confidence=row["confidence"],
+        locations=parse_json_list(row["locations"]),
+        code_version=row["code_version"],
+        evidence=row["evidence"],
+        verifies=row["verifies"],
+        intent_id=row["intent_id"],
+        batch_id=row["batch_id"],
+        effective_confidence=eff_conf,
+        stale=stale,
+    )
 
 
 def next_project_id(conn: sqlite3.Connection) -> str:

@@ -113,6 +113,9 @@ if phase=="bootstrap_conclude":
 if outcome=="fact":
     label = prompt.get("intent_id") or phase
     print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}"}} , ensure_ascii=False))
+elif outcome=="observations":
+    label = prompt.get("intent_id") or phase
+    print(json.dumps({"accepted":True,"data":{"observations":[{"type":"sink","description":f"mock sink for {label}","locations":["mock/file.py:42"]}]}} , ensure_ascii=False))
 elif outcome=="rejected":
     print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
 else:

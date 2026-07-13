@@ -4,7 +4,13 @@ from datetime import datetime
 import yaml
 
 from cairn.server.db import get_conn
-from cairn.server.services import expire_reason_leases, expire_workers, get_project_or_404
+from cairn.server.services import (
+    effective_confidence,
+    expire_reason_leases,
+    expire_workers,
+    get_project_or_404,
+    parse_json_list,
+)
 
 router = APIRouter(tags=["export"])
 
@@ -25,7 +31,7 @@ def _load_project_data(conn, project_id: str):
     proj = get_project_or_404(conn, project_id)
 
     facts = conn.execute(
-        "SELECT id, description FROM facts WHERE project_id = ?", (project_id,)
+        "SELECT * FROM facts WHERE project_id = ?", (project_id,)
     ).fetchall()
     hints = conn.execute(
         "SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at",
@@ -77,7 +83,32 @@ def _export_yaml(conn, project_id: str) -> str:
             for h in hints
         ]
 
-    data["facts"] = [{"id": f["id"], "description": f["description"]} for f in facts]
+    data["facts"] = []
+    for f in facts:
+        fact_entry: dict = {"id": f["id"], "description": f["description"]}
+        if f["type"]:
+            fact_entry["type"] = f["type"]
+        locations = parse_json_list(f["locations"])
+        if locations:
+            fact_entry["locations"] = locations
+        if f["confidence"]:
+            fact_entry["confidence"] = f["confidence"]
+        if f["code_version"]:
+            fact_entry["code_version"] = f["code_version"]
+        if f["verifies"]:
+            fact_entry["verifies"] = f["verifies"]
+        eff_conf, stale = effective_confidence(
+            conn, project_id,
+            own_confidence=f["confidence"],
+            own_code_version=f["code_version"],
+            own_type=f["type"],
+            fact_id=f["id"],
+        )
+        if eff_conf:
+            fact_entry["effective_confidence"] = eff_conf
+        if stale:
+            fact_entry["stale"] = True
+        data["facts"].append(fact_entry)
 
     intent_list = []
     for i in intents:

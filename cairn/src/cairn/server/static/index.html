@@ -566,7 +566,20 @@
         </div>
       </div>
 
-      <div id="cy" class="relative z-0 flex-1 h-full"></div>
+      <div id="cy" class="relative z-0 flex-1 h-full">
+        <div class="absolute bottom-3 left-3 z-10 bg-white/90 backdrop-blur rounded-xl border border-slate-200 shadow-sm p-2.5 text-[10px] space-y-1" x-show="project && project.facts">
+          <div class="text-slate-400 font-semibold mb-1.5 uppercase tracking-wider">Legend</div>
+          <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-teal-500 shrink-0"></span><span class="text-slate-600">origin</span></div>
+          <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-rose-500 shrink-0"></span><span class="text-slate-600">goal</span></div>
+          <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-cyan-500 border border-cyan-600 shrink-0"></span><span class="text-slate-600">source</span></div>
+          <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-orange-500 border border-orange-600 shrink-0"></span><span class="text-slate-600">sink</span></div>
+          <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-violet-500 border border-violet-600 shrink-0"></span><span class="text-slate-600">dataflow</span></div>
+          <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-red-50 border border-dashed border-red-400 shrink-0"></span><span class="text-slate-600">constraint</span></div>
+          <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full bg-emerald-500 border border-emerald-600 shrink-0"></span><span class="text-slate-600">verification</span></div>
+          <hr class="border-slate-100 my-0.5">
+          <div class="text-slate-300 text-[9px]">Border = confidence level</div>
+        </div>
+      </div>
     </div>
 
     <div @pointerdown.prevent="startPanelResize($event)" class="w-2 shrink-0 cursor-col-resize group flex items-stretch justify-center touch-none relative z-20">
@@ -615,6 +628,12 @@
                 </div>
                 <div class="p-4 space-y-3">
                   <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="fact.description"></p>
+                  <div class="flex items-center gap-1.5 flex-wrap" x-show="fact.type">
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold" :class="factTypeBadgeClass(fact.type)" x-text="fact.type"></span>
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                      :class="confidenceBadgeClass(fact.effective_confidence || fact.confidence)"
+                      x-text="fact.effective_confidence || fact.confidence || ''"></span>
+                  </div>
                   <div class="text-xs text-slate-400 space-y-1.5">
                     <template x-if="fact.id === 'origin'">
                       <p>Project starting point</p>
@@ -646,11 +665,60 @@
             </div>
             <div class="p-4 space-y-4">
               <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="selectedFactRecord().description"></p>
+              <template x-if="selectedFactId() !== 'origin' && selectedFactId() !== 'goal'">
+                <div class="space-y-2 text-xs pt-3 border-t border-slate-100">
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <span class="text-slate-400 shrink-0">Type</span>
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                      :class="factTypeBadgeClass(selectedFactRecord().type)"
+                      x-text="selectedFactRecord().type || 'unknown'"></span>
+                  </div>
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <span class="text-slate-400 shrink-0">Confidence</span>
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                      :class="confidenceBadgeClass(selectedFactEffectiveConfidence())"
+                      x-text="selectedFactEffectiveConfidence() || 'unspecified'"></span>
+                    <span x-show="selectedFactRecord().stale" class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-500">stale</span>
+                  </div>
+                  <template x-if="selectedFactRecord().locations && selectedFactRecord().locations.length">
+                    <div>
+                      <span class="text-slate-400 block mb-1">Locations</span>
+                      <template x-for="loc in selectedFactRecord().locations" :key="loc">
+                        <div class="font-mono text-[10px] text-slate-500 bg-slate-50 rounded px-1.5 py-0.5 mb-0.5" x-text="loc"></div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="selectedFactRecord().evidence">
+                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Evidence</span><span class="text-slate-600 text-right break-all" x-text="selectedFactRecord().evidence"></span></div>
+                  </template>
+                  <template x-if="selectedFactRecord().code_version">
+                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Code Ver</span><span class="font-mono text-[10px] text-slate-500 text-right break-all" x-text="selectedFactRecord().code_version"></span></div>
+                  </template>
+                </div>
+              </template>
               <div class="space-y-3 text-xs">
                 <template x-if="selectedFactId() === 'origin'">
                   <div class="pt-4 border-t border-slate-100">
                     <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-3">Origin</p>
-                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Role</span><span class="text-slate-600 text-right break-words">Project starting point</span></div>
+                    <template x-if="isJsonOrigin()">
+                      <div class="space-y-3">
+                        <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Code Path</span><span class="font-mono text-slate-600 text-right break-all" x-text="parsedOrigin().codebase.path"></span></div>
+                        <div class="flex items-start justify-between gap-3" x-show="parsedOrigin().codebase.commit"><span class="text-slate-400 shrink-0">Commit</span><span class="font-mono text-[10px] text-slate-500 text-right" x-text="parsedOrigin().codebase.commit"></span></div>
+                        <template x-if="parsedOrigin().target">
+                          <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Target</span><span class="font-mono text-slate-600 text-right break-all" x-text="parsedOrigin().target.base_url"></span></div>
+                        </template>
+                        <template x-if="parsedOrigin().allowlist">
+                          <div><span class="text-slate-400 block mb-1">Allowlist</span>
+                            <template x-for="a in parsedOrigin().allowlist" :key="a">
+                              <div class="font-mono text-[10px] text-slate-500 bg-slate-50 rounded px-1.5 py-0.5 mb-0.5" x-text="a"></div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if="!isJsonOrigin()">
+                      <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Role</span><span class="text-slate-600 text-right break-words">Project starting point</span></div>
+                    </template>
                   </div>
                 </template>
                 <template x-if="selectedFactId() === 'goal'">
@@ -2140,8 +2208,9 @@ function cairnApp() {
     buildElements() {
       const nodes = [];
       const edges = [];
+      const factById = Object.fromEntries(this.project.facts.map(f => [f.id, f]));
       for (const f of this.project.facts) {
-        const nodeType = f.id === 'origin' ? 'origin' : f.id === 'goal' ? 'goal' : 'fact';
+        const nodeType = f.id === 'origin' ? 'origin' : f.id === 'goal' ? 'goal' : this.factNodeType(f);
         const label = this.summarizeFactLabel(f);
         const size = this.factNodeSize(label, nodeType);
         nodes.push({ data: {
@@ -2149,9 +2218,29 @@ function cairnApp() {
           label,
           description: f.description,
           nodeType,
+          factType: f.type || '',
+          confidence: f.effective_confidence || f.confidence || '',
+          stale: f.stale ? 'true' : '',
           width: size.width,
           height: size.height,
         }});
+      }
+      const intentToFacts = Object.fromEntries(
+        this.project.intents.filter(i => i.to).map(i => [i.to, i])
+      );
+      for (const f of this.project.facts) {
+        if (f.batch_id && !intentToFacts[f.id] && f.id !== 'origin' && f.id !== 'goal') {
+          const mainFact = this.project.facts.find(
+            mf => mf.batch_id === f.batch_id && mf.id !== f.id && intentToFacts[mf.id]
+          );
+          if (mainFact) {
+            edges.push({ data: {
+              id: `batch_${f.id}_${mainFact.id}`,
+              source: f.id, target: mainFact.id,
+              label: 'same batch', status: 'batch', edgeType: 'batch_scope',
+            }});
+          }
+        }
       }
       for (const intent of this.project.intents) {
         const lbl = intent.description;
@@ -2209,17 +2298,30 @@ function cairnApp() {
         { selector: 'node[nodeType="origin"]', style: { ...common, shape:'round-rectangle','background-color':'#14b8a6',label:'data(label)',color:'#fff','font-size':'11px','font-weight':'bold','text-wrap':'wrap','text-max-width':'92px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':0 }},
         { selector: 'node[nodeType="goal"]', style: { ...common, shape:'round-rectangle','background-color':'#f43f5e',label:'data(label)',color:'#fff','font-size':'11px','font-weight':'bold','text-wrap':'wrap','text-max-width':'92px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':0 }},
         { selector: 'node[nodeType="fact"]', style: { ...common, shape:'round-rectangle','background-color':'#6366f1',label:'data(label)',color:'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':0 }},
+        { selector: 'node[nodeType="fact_source"]', style: { ...common, shape:'round-rectangle','background-color':'#06b6d4',label:'data(label)',color:'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#0891b2' }},
+        { selector: 'node[nodeType="fact_sink"]', style: { ...common, shape:'round-rectangle','background-color':'#f97316',label:'data(label)',color:'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#ea580c' }},
+        { selector: 'node[nodeType="fact_dataflow"]', style: { ...common, shape:'round-rectangle','background-color':'#8b5cf6',label:'data(label)',color:'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#7c3aed' }},
+        { selector: 'node[nodeType="fact_constraint"]', style: { ...common, shape:'round-rectangle','background-color':'#fef2f2','background-opacity':0.96,label:'data(label)',color:'#b91c1c','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#ef4444','border-style':'dashed' }},
+        { selector: 'node[nodeType="fact_verification"]', style: { ...common, shape:'ellipse','background-color':'#10b981',label:'data(label)',color:'#fff','font-size':'9px','font-weight':'bold','text-wrap':'wrap','text-max-width':'100px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':1.5,'border-color':'#059669' }},
+        { selector: 'node[stale="true"]', style: { 'border-color':'#94a3b8','border-style':'dotted','border-width':2 }},
+        { selector: 'node[confidence="poc-confirmed"]', style: { 'border-width':3,'border-color':'#059669' }},
+        { selector: 'node[confidence="reachable-confirmed"]', style: { 'border-width':2.5,'border-color':'#0284c7' }},
+        { selector: 'node[confidence="static-confirmed"]', style: { 'border-width':2,'border-color':'#6366f1' }},
+        { selector: 'node[confidence="hypothesized"]', style: { 'border-width':1.5,'border-color':'#cbd5e1','border-style':'dotted','opacity':0.75 }},
+        { selector: 'node[confidence="refuted"]', style: { 'border-width':2,'border-color':'#ef4444','opacity':0.6 }},
         { selector: 'node[nodeType="in_progress"]', style: { ...common, shape:'ellipse','background-color':'#f59e0b','background-opacity':0.8,label:'?',color:'#fff','font-size':'11px','font-weight':'bold',width:22,height:22,'border-width':2,'border-color':'#d97706' }},
         { selector: 'node[nodeType="unclaimed"]', style: { ...common, shape:'ellipse','background-color':'#cbd5e1','background-opacity':0.5,label:'?',color:'#94a3b8','font-size':'11px','font-weight':'bold',width:20,height:20,'border-width':1.5,'border-color':'#94a3b8','border-style':'dashed' }},
         { selector: 'node[nodeType="bootstrap_pending"]', style: { ...common, shape:'round-rectangle','background-color':'#fff7ed','background-opacity':0.96,label:'data(label)',color:'#c2410c','font-size':'10px','font-weight':'bold',width:'data(width)',height:'data(height)','border-width':1.5,'border-color':'#fdba74','border-style':'dashed','text-wrap':'wrap','text-max-width':'70px' }},
         { selector: 'node[nodeType="bootstrap_running"]', style: { ...common, shape:'round-rectangle','background-color':'#fb923c','background-opacity':0.96,label:'data(label)',color:'#fff7ed','font-size':'10px','font-weight':'bold',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#ea580c','text-wrap':'wrap','text-max-width':'70px' }},
 
         { selector: 'edge[status="concluded"]', style: { width:2,'line-color':'#6ee7b7','target-arrow-color':'#6ee7b7','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.9 }},
+        { selector: 'edge[status="batch"]', style: { width:1,'line-color':'#cbd5e1','line-style':'dotted','line-dash-pattern':[3,5],'target-arrow-color':'#cbd5e1','target-arrow-shape':'none','curve-style':'bezier',label:'data(label)','font-size':'6px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-7,'text-max-width':'60px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.7,'text-background-padding':'1px' }},
         { selector: 'edge[status="in_progress"]', style: { width:2,'line-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'line-dash-offset':0,'target-arrow-color':'#fbbf24','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#b45309','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#fffbeb','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.9 }},
         { selector: 'edge[status="unclaimed"]', style: { width:1.5,'line-color':'#cbd5e1','line-style':'dashed','line-dash-pattern':[5,5],'target-arrow-color':'#cbd5e1','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.7 }},
         { selector: 'edge[status="bootstrap_pending"]', style: { width:2,'line-color':'#fdba74','line-style':'dashed','line-dash-pattern':[8,4],'line-dash-offset':0,'target-arrow-color':'#fdba74','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#c2410c','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'88px','text-wrap':'ellipsis','text-background-color':'#fff7ed','text-background-opacity':0.92,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.85 }},
         { selector: 'edge[status="bootstrap_running"]', style: { width:2.5,'line-color':'#fb923c','line-style':'dashed','line-dash-pattern':[10,4],'line-dash-offset':0,'target-arrow-color':'#fb923c','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#c2410c','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'88px','text-wrap':'ellipsis','text-background-color':'#fff7ed','text-background-opacity':0.92,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.95 }},
         { selector: 'edge[edgeType="bootstrap_scope"]', style: { label:'',width:1.8,'curve-style':'bezier','line-style':'dotted','line-dash-pattern':[2,5],'target-arrow-shape':'triangle-backcurve','arrow-scale':0.75,'target-distance-from-node':2 }},
+        { selector: 'edge[edgeType="batch_scope"]', style: { 'line-style':'dotted','line-dash-pattern':[3,5] }},
 
         { selector: '.highlight', style: { 'z-index':999 }},
         { selector: 'edge.highlight', style: { 'z-index':999 }},
@@ -2477,8 +2579,19 @@ function cairnApp() {
       return `${chars.slice(0, 24).join('')}…`;
     },
 
+    factNodeType(fact) {
+      const t = fact.type || '';
+      if (t === 'constraint') return 'fact_constraint';
+      if (t === 'source') return 'fact_source';
+      if (t === 'sink') return 'fact_sink';
+      if (t === 'dataflow') return 'fact_dataflow';
+      if (t === 'verification') return 'fact_verification';
+      return 'fact';
+    },
+
     factNodeSize(label, nodeType) {
-      const preset = nodeType === 'fact'
+      const isTyped = nodeType.startsWith('fact_') || nodeType === 'fact';
+      const preset = isTyped
         ? { fontSize: 10, maxTextWidth: 116, minWidth: 52, minHeight: 34, paddingX: 10, paddingY: 10 }
         : { fontSize: 11, maxTextWidth: 92, minWidth: 58, minHeight: 38, paddingX: 10, paddingY: 10 };
 
@@ -2827,6 +2940,45 @@ function cairnApp() {
       if (!this.project || this.selectedFacts.length === 0) return [];
       const factsById = new Map(this.project.facts.map(f => [f.id, f]));
       return this.selectedFacts.map(fid => factsById.get(fid)).filter(Boolean);
+    },
+
+    selectedFactEffectiveConfidence() {
+      const r = this.selectedFactRecord();
+      return r ? (r.effective_confidence || r.confidence) : null;
+    },
+
+    factTypeBadgeClass(type) {
+      const map = {
+        'source': 'bg-cyan-50 text-cyan-700 border border-cyan-200',
+        'sink': 'bg-orange-50 text-orange-700 border border-orange-200',
+        'dataflow': 'bg-violet-50 text-violet-700 border border-violet-200',
+        'constraint': 'bg-red-50 text-red-700 border border-red-200',
+        'verification': 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+      };
+      return map[type||''] || 'bg-slate-100 text-slate-600';
+    },
+
+    confidenceBadgeClass(confidence) {
+      const map = {
+        'hypothesized': 'bg-slate-100 text-slate-500 border border-slate-200',
+        'static-confirmed': 'bg-indigo-50 text-indigo-700 border border-indigo-200',
+        'reachable-confirmed': 'bg-sky-50 text-sky-700 border border-sky-200',
+        'poc-confirmed': 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+        'refuted': 'bg-red-50 text-red-700 border border-red-200',
+      };
+      return map[confidence||''] || 'bg-slate-100 text-slate-600';
+    },
+
+    isJsonOrigin() {
+      const originFact = this.project.facts?.find(f => f.id === 'origin');
+      if (!originFact) return false;
+      try { const p = JSON.parse(originFact.description); return p && typeof p === 'object' && p.codebase; } catch { return false; }
+    },
+
+    parsedOrigin() {
+      const originFact = this.project.facts?.find(f => f.id === 'origin');
+      if (!originFact) return { codebase: { path: '' } };
+      try { return JSON.parse(originFact.description) || {}; } catch { return { codebase: { path: '' } }; }
     },
 
     selectedIntentId() {

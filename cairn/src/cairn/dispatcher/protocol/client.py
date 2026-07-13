@@ -114,6 +114,13 @@ class CairnClient:
             json={"worker": worker, "description": description},
         )
 
+    def conclude_observations(self, project_id: str, intent_id: str, worker: str, observations: list[dict]) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/intents/{intent_id}/conclude",
+            json={"worker": worker, "observations": observations},
+        )
+
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
         return self._request_json(
             "POST",

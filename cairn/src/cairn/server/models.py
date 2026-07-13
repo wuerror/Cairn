@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+FactType = Literal["source", "sink", "dataflow", "constraint", "gadget", "reachability", "verification"]
+ConfidenceLevel = Literal["hypothesized", "static-confirmed", "reachable-confirmed", "poc-confirmed", "refuted"]
 
 
 class Settings(BaseModel):
@@ -13,6 +18,24 @@ class Settings(BaseModel):
 class Fact(BaseModel):
     id: str
     description: str
+    type: FactType | None = None
+    confidence: ConfidenceLevel | None = None
+    locations: list[str] | None = None
+    code_version: str | None = None
+    evidence: str | None = None
+    verifies: str | None = None
+    intent_id: str | None = None
+    batch_id: str | None = None
+    effective_confidence: ConfidenceLevel | None = None
+    stale: bool = False
+
+
+class Observation(BaseModel):
+    type: FactType | None = None
+    description: str
+    locations: list[str] | None = None
+    evidence: str | None = None
+    oracle_draft: str | None = None
 
 
 class Intent(BaseModel):
@@ -87,12 +110,39 @@ class CreateProjectRequest(BaseModel):
     bootstrap_enabled: bool = True
     hints: list[CreateHintInline] | None = None
 
-    @field_validator("title", "origin", "goal")
+    @field_validator("title", "goal")
     @classmethod
     def validate_non_empty_text(cls, value: str) -> str:
         text = value.strip()
         if not text:
             raise ValueError("must not be empty")
+        return text
+
+    @field_validator("origin")
+    @classmethod
+    def validate_origin(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if not isinstance(parsed, dict):
+            return text
+        if "codebase" not in parsed or not isinstance(parsed.get("codebase"), dict):
+            raise ValueError("origin JSON must contain 'codebase' object with 'path'")
+        cb = parsed["codebase"]
+        if not isinstance(cb.get("path"), str) or not cb["path"].strip():
+            raise ValueError("origin codebase.path is required")
+        if "target" in parsed:
+            target = parsed["target"]
+            if not isinstance(target, dict):
+                raise ValueError("origin target must be an object")
+            if not isinstance(target.get("base_url"), str) or not target["base_url"].strip():
+                raise ValueError("origin target.base_url is required when target is present")
+        if "allowlist" in parsed and not isinstance(parsed["allowlist"], list):
+            raise ValueError("origin allowlist must be an array")
         return text
 
 
@@ -166,15 +216,30 @@ class ReasonClaimRequest(BaseModel):
 
 class ConcludeRequest(BaseModel):
     worker: str
-    description: str
+    description: str | None = None
+    observations: list[Observation] | None = None
 
-    @field_validator("worker", "description")
+    @field_validator("worker")
     @classmethod
     def validate_non_empty_text(cls, value: str) -> str:
         text = value.strip()
         if not text:
             raise ValueError("must not be empty")
         return text
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "ConcludeRequest":
+        if self.description is not None and self.observations is not None:
+            raise ValueError("description and observations cannot coexist")
+        if self.description is not None:
+            text = self.description.strip()
+            if not text:
+                raise ValueError("description must not be empty")
+        if self.observations is not None and len(self.observations) == 0:
+            raise ValueError("observations must not be empty")
+        if self.description is None and self.observations is None:
+            raise ValueError("either description or observations is required")
+        return self
 
 
 class CompleteRequest(BaseModel):
@@ -205,7 +270,8 @@ class CompleteRequest(BaseModel):
 
 
 class ConcludeResponse(BaseModel):
-    fact: Fact
+    fact: Fact | None = None
+    facts: list[Fact] = Field(default_factory=list)
     intent: Intent
 
 

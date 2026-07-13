@@ -59,6 +59,10 @@ def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
     return isinstance(payload, dict) and set(payload) == {"description"}
 
 
+def _looks_like_rich_explore_data(payload: dict[str, Any]) -> bool:
+    return isinstance(payload, dict) and set(payload) == {"observations"}
+
+
 def validate_reason_payload(
     payload: dict[str, Any], open_intents_empty: bool, max_intents: int,
 ) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None]:
@@ -154,17 +158,53 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
     return "fact", fact_description.strip()
 
 
-def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
+def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
     if accepted is None:
-        if not _looks_like_explore_data(payload):
+        if not _looks_like_explore_data(payload) and not _looks_like_rich_explore_data(payload):
             raise ValueError("accepted must be true or false")
         data = payload
     if not isinstance(data, dict):
         raise ValueError("accepted must be true or false")
+
+    if "observations" in data:
+        observations = data["observations"]
+        if not isinstance(observations, list) or len(observations) == 0:
+            raise ValueError("observations must be a non-empty array")
+        result: list[dict[str, Any]] = []
+        for i, obs in enumerate(observations):
+            if not isinstance(obs, dict):
+                raise ValueError(f"observation at index {i} must be an object")
+            description = obs.get("description")
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError(f"observation[{i}].description is required")
+            normalized: dict[str, Any] = {"description": description.strip()}
+            obs_type = obs.get("type")
+            if obs_type is not None:
+                if not isinstance(obs_type, str) or not obs_type.strip():
+                    raise ValueError(f"observation[{i}].type must be a non-empty string")
+                normalized["type"] = obs_type.strip()
+            locations = obs.get("locations")
+            if locations is not None:
+                if not isinstance(locations, list) or not all(isinstance(l, str) for l in locations):
+                    raise ValueError(f"observation[{i}].locations must be an array of strings")
+                normalized["locations"] = locations
+            evidence = obs.get("evidence")
+            if evidence is not None:
+                if not isinstance(evidence, str) or not evidence.strip():
+                    raise ValueError(f"observation[{i}].evidence must be a non-empty string")
+                normalized["evidence"] = evidence.strip()
+            oracle_draft = obs.get("oracle_draft")
+            if oracle_draft is not None:
+                if not isinstance(oracle_draft, str) or not oracle_draft.strip():
+                    raise ValueError(f"observation[{i}].oracle_draft must be a non-empty string")
+                normalized["oracle_draft"] = oracle_draft.strip()
+            result.append(normalized)
+        return "observations", result
+
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description is required")
-    return "fact", description.strip()
+    return "fact", [{"description": description.strip()}]

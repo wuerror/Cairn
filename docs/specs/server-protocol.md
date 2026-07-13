@@ -860,5 +860,103 @@ intents:
    a. POST /projects/{id}/reopen
         { description: "flag FLAG{fake} 是错误的，需要继续寻找正确 flag", creator: "judge" }
    b. 项目回到 `active`，图中新增一条 `external_feedback` 结论边和一个纠错 Fact
-   c. 回到步骤 1
+    c. 回到步骤 1
+
+
+---
+
+## Code Audit 扩展
+
+本章是对 Cairn 代码审计形态（`code-audit-design.md`）的协议层补充，不重复设计动机，只记录与基础协议不同的契约变更。
+
+### Fact 富字段
+
+代码审计场景下 Fact 扩展以下字段（全部可空，向后兼容存量项目）：
+
+```
+id              # "origin" | "goal" | 系统生成（如 f001）
+description     # 客观事实描述（保留）
+type            # "source" | "sink" | "dataflow" | "constraint" | "gadget" | "reachability" | "verification" | null
+confidence      # "hypothesized" | "static-confirmed" | "reachable-confirmed" | "poc-confirmed" | "refuted" | null
+locations       # JSON 数组 ["file:line", ...]
+code_version    # 创建时的代码版本标识（server 盖章，模型不填）
+evidence        # 证据（taint path / snippet / poc_ref）
+verifies        # 仅 type=verification：本 fact 实证的目标 fact id
+intent_id       # 产出本 fact 的 Intent id（server 盖章）
+batch_id        # 同一次 conclude 写入的 N facts 共享标识（server 盖章）
+```
+
+### confidence 是派生视图
+
+Fact 的 `confidence` 字段写死在创建时，**永不就地改写**。confidence 升级/证伪通过追加 `type: verification` 的新 fact（`verifies` 指向被验证节点）表达。某节点的有效 confidence 由 server 折叠得出（取指向它的最新未过期 verification fact 的档位；若 `code_version` 失配则该 verification 不计入；无有效 verification 则回落自身档位并标注 `stale`）。
+
+因此：
+- **Fact 的 `description` / `confidence` 永不被 UPDATE 修改**——append-only 语义不变。`locations` 允许通过去重合并单调做并集 UPDATE（`type + sorted(locations)` 匹配时取并集，`code_version` 随之重算），目的是避免同一 sink 被多 worker 重复发现后拆成多个节点。
+- `confidence` 在 `GET /projects/{id}` 和 `export` 中返回的是**存储值**（创建时档位）
+- **折叠视图**（`effective_confidence` + `stale` 标志）在 export 中额外返回，Reason / UI 以此为准
+
+### type: verification 与 verifies 边
+
+图从此有两类边：
+- **Intent 边**（`from[] → to`）：表达探索因果，是图的主边
+- **`verifies` 边**（verification fact → 被验证 node）：表达实证关系，是副边
+
+折叠视图把 verification fact 挂到被验证节点上展示。`relevant_subgraph`（P1）的反向可达只沿 Intent 边走，但返回前按有效 confidence 过滤掉已 `refuted` 的路径。
+
+### 1→N Conclude
+
+Conclude 端点支持一次写入多个 Fact（`observations` 数组），产出 `N` 条 fact + 1 条 intent 结论边。
+
+Body（旧兼容路径）：
+```json
+{ "worker": "agent-B", "description": "发现 SQL 注入点" }
+```
+
+Body（新富路径）：
+```json
+{
+  "worker": "agent-B",
+  "observations": [
+    { "type": "source", "description": "/api/import 接受未认证上传", "locations": ["app/api/import_bp.py:31"] },
+    { "type": "sink", "description": "yaml.load 使用不安全 Loader", "locations": ["app/config_loader.py:19"] },
+    { "type": "dataflow", "description": "config 字段 → yaml.load 无 sanitize", "locations": ["app/config_loader.py:12"] }
+  ]
+}
+```
+
+响应：
+```json
+{
+  "fact": { "id": "f003", "description": "...", "type": "dataflow", ... },
+  "facts": [
+    { "id": "f001", "description": "...", "type": "source", ... },
+    { "id": "f002", "description": "...", "type": "sink", ... },
+    { "id": "f003", "description": "...", "type": "dataflow", ... }
+  ],
+  "intent": { "id": "i002", "from": ["f001"], "to": "f003", ... }
+}
+```
+
+`fact` 字段为**主 fact**（向后兼容），`facts` 为全部产出。主 fact 选择规则：explore → 优先 `dataflow`，否则第一个 `sink` / `source`。
+
+### origin 结构化
+
+`origin` 由自由文本升为可解析 JSON，形状：
+
+```json
+{
+  "codebase": { "path": "/path/to/repo", "commit": "a1b2c3d" },
+  "target": { "base_url": "https://test.example.com", "credentials_ref": "secret:xxx" },
+  "allowlist": ["test.example.com:443", "oob.example.com"]
+}
+```
+
+`credentials_ref` 仅存引用，不含明文。`origin` 仍作为保留 `origin` fact 的 description 落库，不新增表。向后兼容：非 JSON 的 `origin` 字符串仍合法。
+
+### 门控字段（模型不可写）
+
+以下字段由 server/dispatcher 盖章，模型永不可写：
+- `id`、`batch_id`、`code_version`（server 分配/哈希）
+- `intent_id`（从 conclude 上下文注入）
+- `confidence` 高档位（`reachable-confirmed` / `poc-confirmed` / `refuted`）仅能由验证路径写入，审计侧最高 `static-confirmed`
 ```

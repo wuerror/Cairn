@@ -52,7 +52,9 @@ def test_project_workflow_create_conclude_complete_and_reopen(client: TestClient
         json={"worker": "explorer", "description": "new fact"},
     )
     assert response.status_code == 200
-    assert response.json()["fact"] == {"id": "f001", "description": "new fact"}
+    fact = response.json()["fact"]
+    assert fact["id"] == "f001"
+    assert fact["description"] == "new fact"
 
     response = client.post(
         f"/projects/{project_id}/complete",
@@ -68,7 +70,8 @@ def test_project_workflow_create_conclude_complete_and_reopen(client: TestClient
     assert response.status_code == 200
     payload = response.json()
     assert payload["project"]["status"] == "active"
-    assert payload["fact"] == {"id": "f002", "description": "human correction"}
+    assert payload["fact"]["id"] == "f002"
+    assert payload["fact"]["description"] == "human correction"
     assert payload["intent"]["from"] == ["f001"]
     assert payload["intent"]["to"] == "f002"
 
@@ -207,3 +210,355 @@ def test_project_creation_rejects_invalid_bootstrap_enabled(client: TestClient) 
     )
 
     assert response.status_code == 422
+
+
+def test_conclude_with_rich_observations_produces_multiple_facts(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "source", "description": "input at api.py:10", "locations": ["api.py:10"]},
+                {"type": "sink", "description": "exec at util.py:20", "locations": ["util.py:20"]},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["facts"]) == 2
+    fact_ids = {f["id"] for f in payload["facts"]}
+    assert fact_ids == {"f001", "f002"}
+
+    main = payload["fact"]
+    assert main["type"] == "sink"
+    assert main["id"] in fact_ids
+    assert payload["intent"]["to"] == main["id"]
+
+
+def test_conclude_main_fact_priority_dataflow_over_sink(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "sink", "description": "sink", "locations": ["a.py:1"]},
+                {"type": "source", "description": "source", "locations": ["b.py:1"]},
+                {"type": "dataflow", "description": "dataflow", "locations": ["c.py:1"]},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["fact"]["type"] == "dataflow"
+
+
+def test_dedup_merges_locations_and_skips_duplicate_facts(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "sink", "description": "sink A", "locations": ["file.py:10"]},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    first_fid = response.json()["fact"]["id"]
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "more work", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i002/heartbeat",
+        json={"worker": "explorer"},
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/intents/i002/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "sink", "description": "sink A again", "locations": ["file.py:10"]},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["fact"]["id"] == first_fid
+    assert response.json()["fact"]["locations"] == ["file.py:10"]
+
+    exported = client.get(f"/projects/{project_id}/export?format=yaml")
+    assert exported.status_code == 200
+    fact_count = sum(1 for line in exported.text.splitlines() if line.startswith("- id: f"))
+    assert fact_count == 1
+
+
+def test_dedup_same_type_different_locations_creates_separate_fact(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "work", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "sink", "description": "sink at file.py:10", "locations": ["file.py:10"]},
+            ],
+        },
+    )
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "more", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i002/heartbeat",
+        json={"worker": "explorer"},
+    )
+    response = client.post(
+        f"/projects/{project_id}/intents/i002/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "sink", "description": "sink at file.py:15", "locations": ["file.py:15"]},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["fact"]["id"] == "f002"
+
+
+def test_dedup_preserves_first_written_description(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "work", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+
+    client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "sink", "description": "first description", "locations": ["x.py:1"]},
+            ],
+        },
+    )
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "more", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i002/heartbeat",
+        json={"worker": "explorer"},
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/intents/i002/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                    {"type": "sink", "description": "different description", "locations": ["x.py:1"]},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["fact"]["description"] == "first description"
+
+
+def test_origin_json_validation_accepts_valid_json(client: TestClient) -> None:
+    origin = '{"codebase": {"path": "/repo", "commit": "abc123"}, "target": {"base_url": "https://example.com", "credentials_ref": "secret:key"}, "allowlist": ["host:443"]}'
+    response = client.post(
+        "/projects",
+        json={
+            "title": "valid origin json",
+            "origin": origin,
+            "goal": "unauth RCE",
+        },
+    )
+    assert response.status_code == 201
+
+
+def test_origin_json_validation_rejects_missing_codebase_path(client: TestClient) -> None:
+    response = client.post(
+        "/projects",
+        json={
+            "title": "bad origin",
+            "origin": '{"codebase": {}}',
+            "goal": "unauth RCE",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_origin_json_validation_rejects_bad_target(client: TestClient) -> None:
+    response = client.post(
+        "/projects",
+        json={
+            "title": "bad target",
+            "origin": '{"codebase": {"path": "/repo"}, "target": "not_an_object"}',
+            "goal": "unauth RCE",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_origin_json_validation_rejects_bad_allowlist(client: TestClient) -> None:
+    response = client.post(
+        "/projects",
+        json={
+            "title": "bad allowlist",
+            "origin": '{"codebase": {"path": "/repo"}, "allowlist": "not_array"}',
+            "goal": "unauth RCE",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_code_version_computed_and_present_in_export(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "work", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+    response = client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "sink", "description": "dangerous exec", "locations": ["app/util.py:42"]},
+            ],
+        },
+    )
+    assert response.status_code == 200
+
+    exported = client.get(f"/projects/{project_id}/export?format=yaml")
+    assert exported.status_code == 200
+    assert "code_version:" in exported.text
+
+
+def test_effective_confidence_in_export(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "work", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "sink", "description": "dangerous exec", "locations": ["app/util.py:42"]},
+            ],
+        },
+    )
+
+    exported = client.get(f"/projects/{project_id}/export?format=yaml")
+    assert exported.status_code == 200
+    assert "type: sink" in exported.text
+    assert "confidence: static-confirmed" in exported.text
+    assert "effective_confidence: static-confirmed" in exported.text
+
+
+def test_legacy_single_description_conclude_still_works(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={"worker": "explorer", "description": "plain text fact"},
+    )
+    assert response.status_code == 200
+    assert response.json()["fact"]["description"] == "plain text fact"
+    assert len(response.json()["facts"]) == 1
+
+
+def test_backward_compatible_export_includes_fact_type_and_confidence(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "work", "creator": "reasoner", "worker": None},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/heartbeat",
+        json={"worker": "explorer"},
+    )
+    client.post(
+        f"/projects/{project_id}/intents/i001/conclude",
+        json={
+            "worker": "explorer",
+            "observations": [
+                {"type": "constraint", "description": "auth middleware blocks unauthenticated requests", "locations": ["app/middleware.py:10"]},
+            ],
+        },
+    )
+
+    detail = client.get(f"/projects/{project_id}").json()
+    fact = detail["facts"][-1]
+    assert fact["type"] == "constraint"
+    assert fact["confidence"] == "static-confirmed"
+    assert fact["locations"] == ["app/middleware.py:10"]

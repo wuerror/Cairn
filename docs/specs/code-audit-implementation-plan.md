@@ -12,6 +12,7 @@
 - **窄腰红线（决策 #5）。** 模型只吐扁平 `emit schema`；`id` / `code_version` / `intent_id` / `batch_id` / `confidence` 门控全在 server。任何"让模型填富 schema"的实现都要打回。
 - **append-only 红线（决策 #6）。** 没有任何 fact 被就地改写。confidence 升级 = 追加 `type: verification` fact；有效 confidence 是 server 折叠视图。
 - **分期交付。** P0 不需要测试环境即可跑通（富 fact + 窄腰 + 1→N conclude + 折叠 + origin 解析）；P1 加持久化与真实子图检索；P2 才引入"对实况环境发包"的验证路径与合规围栏。
+- **前端同期适配（本版新增）。** 前端是一个**单文件静态 SPA**（`server/static/index.html`，Alpine.js + Cytoscape + Tailwind，无构建步骤，server 直接托管）。富 fact 的 `type`/`confidence`/`locations`/`verifies` 若不改前端就在 UI 上隐形，且决策 #7 的附属 fact 会变成图上孤点。每个后端阶段配一条前端泳道（`P0.8`/`P1.5`/`P2.7`）。**合规人工闸门是 P2 的独立大界面，工作量不亚于部分后端。**
 
 ### 就绪度对照（同事第三轮判断）
 
@@ -22,6 +23,7 @@
 | 跨 run 持久化 + `relevant_subgraph` 真实实现 + 防腐 | 结构边已定(#12) | **P1** |
 | 真实验证：verify 相 + capability + 双容器 + harness + Brief 组装 + 合规闸门 | 三缝已补(#12/#13/#14) | **P2** |
 | Codebase / Goal-Run 拆表、向量检索、`preconditions`/`chain` 自动修复、`gadget`/`reachability` 类型 | 可后置 | **Later** |
+| 前端适配（富 fact 可视化 + 图外第二存储面板 + 合规人工闸门） | 原计划遗漏，本版补 | **P0补齐 / P1 / P2** |
 
 ---
 
@@ -38,6 +40,7 @@
 | worker 路由 | 只按 `task_types` 过滤 + `priority/running/random` 排序 | `loop.py:_select_worker`、`worker_select.py` |
 | 容器 | 一 project 一 container，单 image/network/cap | `config.py:ContainerConfig`、`runtime/containers.py` |
 | 存储 | SQLite（WAL），schema 内联 + 轻量迁移 | `server/db.py` |
+| 前端 | 单文件静态 SPA（Alpine + Cytoscape + Tailwind，无构建）；节点配色/详情/表单只认 `id`+`description`，`nodeType` 靠 id 算（origin/goal/其余） | `server/static/index.html`（`buildElements`:2143、node style:2209+、fact 面板:634-681、conclude 表单:865/3333） |
 
 ---
 
@@ -79,7 +82,16 @@
 - [ ] `config.py:MOCK_ALLOWED_OUTCOMES`/`MOCK_DEFAULT_BEHAVIOR`：explore 增加"多 observation"产出形态。
 - [ ] 单测：去重并集、`code_version` 盖章、confidence 门控拒绝越权档位、1→N conclude 的 `to`=主 fact、折叠视图 P0 退化正确。
 
-**P0 出口判据**：mock/真实静态 worker 能对一个只读代码库产出带 type/locations 的富 fact 图，重复发现自动合并，Reason 能按有效 confidence 读图；全程无 fact 被就地改写；origin 可解析出 allowlist/commit。
+### P0.8 前端补齐（`server/static/index.html`）
+> P0 后端已让富 fact 落库，但 UI 全是同色方块 + 若干孤点，等于白存了 `type`。这几项应**紧跟 P0 做**。
+- [ ] **按 `fact.type` 配色/形状 + 图例。** `buildElements()`（`2143`）现在 `nodeType` 只算 `origin/goal/fact`；改为读 `f.type` 映射出 `source/sink/dataflow/constraint/verification`，在 cytoscape style（`2209+`）加对应 `node[nodeType="..."]` selector，补一个图例块。负向 `constraint` 要有一眼可辨的负向视觉（如红/虚线）。
+- [ ] **修 batch_id 孤岛节点（真回归）。** `buildElements` 只在 `intent.from → intent.to` 画边（`2156-2160`）；决策 #7 的 N-1 附属 fact 不是任何 intent 的 `to`，会无入边飘着。方案：给同 `batch_id` 的附属 fact 画到主 fact 的"同批"虚线边，或收进主 fact 的复合/分组节点。底线是不能是孤点。
+- [ ] **fact 详情面板显富字段。** `634-681` 现只显 `description` + 产出 intent；加 `type` 徽章、`effective_confidence`（带 `stale` 标记）、`locations`（file:line 列表）、`evidence`。
+- [ ] **confidence 视觉阶梯。** 节点边框/透明度按 `hypothesized → static-confirmed → …` 编码，让"多确定"可视。
+- [ ] **origin 现在是 JSON。** `origin` fact 详情（`619-624`、`650-668`）改为解析 JSON 展示 `codebase`/`target`/`allowlist`，而非 raw 文本。
+- [ ] （可选）conclude/complete 表单（`865`、`892`）允许人工产 fact 时选 `type`/填 `locations`；并反映 server 门控（人工最高 `static-confirmed`）。
+
+**P0 出口判据**：mock/真实静态 worker 能对一个只读代码库产出带 type/locations 的富 fact 图，重复发现自动合并，Reason 能按有效 confidence 读图；全程无 fact 被就地改写；origin 可解析出 allowlist/commit；**UI 上 fact 按 type 区分配色、附属 fact 不再是孤点、详情面板可见 type/confidence/locations**。
 
 ---
 
@@ -109,7 +121,12 @@
 ### P1.4 测试
 - [ ] 反向可达遍历正确（含 constraint、剔除 refuted）；跨 run 复用不重建；基座 patch 审计链完整。
 
-**P1 出口判据**：goal #2 的 Reason 只看相关子图、复用 goal #1 已确认 fact、不重挖；代码变动后旧 fact 自动降 stale。
+### P1.5 前端（`server/static/index.html`）
+- [ ] **基座知识 / routing_map 面板（图外第二存储，UI 今天完全没有）。** 新 tab/面板显 `base_knowledge.entries`（kind/statement/evidence/confidence/revised_by）+ `routing_map`，并显 `version` 与 `revised_by` 审计链（谁/因哪条 fact/何时）。
+- [ ] **按 goal 过滤/高亮子图。** Reason 现在吃 `relevant_subgraph`；跨 run 大图会糊，UI 加"聚焦当前 goal 相关子图"开关（前端过滤或调用 `relevant_subgraph` 接口）。
+- [ ] **`stale` 节点显式标记。** 代码变动后待重验的节点在图上要有别于正常节点。
+
+**P1 出口判据**：goal #2 的 Reason 只看相关子图、复用 goal #1 已确认 fact、不重挖；代码变动后旧 fact 自动降 stale；**UI 能查看基座/routing_map 及其 revised_by 审计链，能按 goal 聚焦子图**。
 
 ---
 
@@ -147,7 +164,13 @@
 - [ ] 起一个**本地一次性靶标**（如刻意可 RCE 的 Flask demo）跑 Worked Example 那条链，端到端到 `poc-confirmed`；
 - [ ] allowlist 拒绝越界目标；kill-switch 能中止；失败路径产出 refuted+constraint 并反向制导。
 
-**P2 出口判据**：授权测试环境上，一条候选链能被验证 worker 实证到 `poc-confirmed`，全程流量留档、越界被拒、可一键中止；失败被结构化回写并反哺审计。
+### P2.7 前端（`server/static/index.html`）—— 合规面板是重头
+- [ ] **`verifies` 第二类边渲染。** `buildElements` 今天只有 Intent 边；verification fact → 被验证节点要画成**区别于 Intent 边的第二类边**（不同颜色/线型），并把 verification 折叠展示在被验证节点上（呼应决策 #6/#12 的"两类边"）。
+- [ ] **PoC Brief 查看器。** verify Intent 上挂的结构化 Brief（chain / entry / dataflow / payload_recipe / success_signature）可查看。
+- [ ] **人工闸门面板（合规硬需求，新的大界面）。** 设计文档 §合规 point 2 的"开火前人工确认"落在这里：审攻击流量（代理留档的 request/response，基线 vs payload diff）、approve/deny 开火（复用 `Hint` 写确认）、**kill-switch 按钮**（接 `runtime/cancellation.py`）、`origin.allowlist` 展示。
+- [ ] **harness_result 展示。** `triggered`/`evidence`/`why_failed`/`request`/`response` 结构化呈现，成功/失败一眼可辨。
+
+**P2 出口判据**：授权测试环境上，一条候选链能被验证 worker 实证到 `poc-confirmed`，全程流量留档、越界被拒、可一键中止；失败被结构化回写并反哺审计；**UI 能查看 Brief、verification 边与 harness 结果，且开火前的人工确认与 kill-switch 都在面板上可操作**。
 
 ---
 
@@ -185,3 +208,4 @@
 - **窄腰回归**：每次改 prompt/emit 都要回归"模型有没有被要求填门控字段"（confidence 高档位、code_version、id）。
 - **append-only 回归**：加一条测试断言"任何 conclude 都不 UPDATE 已存在 fact 的内容字段"。
 - **合规**：P2 上线前，allowlist 拒绝、kill-switch、代理留档三项必须有自动化测试，不能只靠人工。
+- **前端隐形回归**：`index.html` 无构建、无类型检查，富字段"忘了显"不会报错、只会静默隐形（P0 已出现：附属 fact 变孤点、type 不配色）。判据是"看图能不能一眼读出 type/confidence"，而非"接口有没有返回字段"。合规闸门面板还需人工走查 approve/deny/kill-switch 的实际生效。

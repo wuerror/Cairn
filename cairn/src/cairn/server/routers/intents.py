@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+import json
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -8,14 +9,21 @@ from cairn.server.models import (
     Fact,
     HeartbeatRequest,
     Intent,
+    Observation,
 )
 from cairn.server.services import (
+    AUDIT_MAX_CONFIDENCE,
     check_project_active,
+    compute_code_version,
+    find_existing_fact,
+    gate_confidence,
     get_claimable_open_intent_or_404,
     get_releasable_open_intent_or_404,
     intent_to_model,
+    merge_locations,
     next_fact_id,
     next_intent_id,
+    parse_json_list,
     utcnow,
     validate_facts_exist,
     validate_intent_creator_worker,
@@ -23,6 +31,8 @@ from cairn.server.services import (
 )
 
 router = APIRouter(tags=["intents"])
+
+MAIN_FACT_TYPE_PRIORITY: list[str] = ["dataflow", "sink", "source", "constraint", "verification"]
 
 
 @router.post(
@@ -125,15 +135,76 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)
 
         now = utcnow()
-        fid = next_fact_id(conn, project_id)
+        batch_id = f"b{intent_id}_{utcnow().replace('-', '').replace(':', '').replace('T', '').replace('Z', '')}"
 
-        conn.execute(
-            "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
-            (fid, project_id, body.description),
-        )
+        if body.observations is not None:
+            observations = body.observations
+        else:
+            observations = [Observation(description=body.description)]
+
+        origin_row = conn.execute(
+            "SELECT description FROM facts WHERE project_id = ? AND id = 'origin'",
+            (project_id,),
+        ).fetchone()
+        origin_desc = origin_row["description"] if origin_row else None
+
+        created_facts: list[Fact] = []
+        for obs in observations:
+            obs_confidence = obs.type is not None and AUDIT_MAX_CONFIDENCE or None
+            gate_confidence(obs.type, obs_confidence)
+
+            existing = find_existing_fact(conn, project_id, obs.type, obs.locations)
+            if existing is not None:
+                merged_locations_json = merge_locations(
+                    parse_json_list(existing["locations"]),
+                    obs.locations,
+                )
+                merged_code_version = compute_code_version(
+                    parse_json_list(merged_locations_json) if merged_locations_json else None,
+                    origin_desc,
+                )
+                conn.execute(
+                    "UPDATE facts SET locations = ?, code_version = ? WHERE id = ? AND project_id = ?",
+                    (merged_locations_json, merged_code_version, existing["id"], project_id),
+                )
+                created_facts.append(_row_to_fact(
+                    id=existing["id"],
+                    description=existing["description"],
+                    obs_type=existing["type"],
+                    obs_confidence=existing["confidence"],
+                    obs_locations=merged_locations_json,
+                    code_version=merged_code_version,
+                    evidence=existing["evidence"],
+                    verifies=existing["verifies"],
+                    intent_id=existing["intent_id"],
+                    batch_id=existing["batch_id"],
+                ))
+                continue
+
+            fid = next_fact_id(conn, project_id)
+            code_version = compute_code_version(obs.locations, origin_desc)
+            locations_json = json.dumps(sorted(obs.locations)) if obs.locations else None
+
+            conn.execute(
+                """INSERT INTO facts (id, project_id, description, type, confidence,
+                   locations, code_version, evidence, verifies, intent_id, batch_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    fid, project_id, obs.description, obs.type, obs_confidence,
+                    locations_json, code_version, obs.evidence, None, intent_id, batch_id,
+                ),
+            )
+            created_facts.append(_row_to_fact(
+                id=fid, description=obs.description, obs_type=obs.type,
+                obs_confidence=obs_confidence, obs_locations=locations_json,
+                code_version=code_version, evidence=obs.evidence,
+                verifies=None, intent_id=intent_id, batch_id=batch_id,
+            ))
+
+        main_fact = _select_main_fact(created_facts)
         conn.execute(
             "UPDATE intents SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ? WHERE id = ? AND project_id = ?",
-            (fid, body.worker, now, now, intent_id, project_id),
+            (main_fact.id, body.worker, now, now, intent_id, project_id),
         )
 
         updated = conn.execute(
@@ -142,6 +213,42 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         ).fetchone()
 
         return ConcludeResponse(
-            fact=Fact(id=fid, description=body.description),
+            fact=main_fact,
+            facts=created_facts,
             intent=intent_to_model(conn, updated, project_id),
         )
+
+
+def _row_to_fact(
+    *,
+    id: str,
+    description: str,
+    obs_type: str | None,
+    obs_confidence: str | None = None,
+    obs_locations: str | None = None,
+    code_version: str | None = None,
+    evidence: str | None = None,
+    verifies: str | None = None,
+    intent_id: str | None = None,
+    batch_id: str | None = None,
+) -> Fact:
+    return Fact(
+        id=id,
+        description=description,
+        type=obs_type,
+        confidence=obs_confidence,
+        locations=parse_json_list(obs_locations) if obs_locations else None,
+        code_version=code_version,
+        evidence=evidence,
+        verifies=verifies,
+        intent_id=intent_id,
+        batch_id=batch_id,
+    )
+
+
+def _select_main_fact(facts: list[Fact]) -> Fact:
+    for priority_type in MAIN_FACT_TYPE_PRIORITY:
+        for f in facts:
+            if f.type == priority_type:
+                return f
+    return facts[0]

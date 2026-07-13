@@ -180,6 +180,61 @@ def best_effort_release_reason(client: CairnClient, project_id: str, worker_name
         )
 
 
+def write_conclude_result_with_observations(
+    client: CairnClient,
+    project_id: str,
+    intent_id: str,
+    worker_name: str,
+    observations: list[dict],
+    *,
+    source: str,
+    phase_ms: int,
+    total_ms: int | None = None,
+) -> str:
+    response = client.conclude_observations(project_id, intent_id, worker_name, observations)
+    if response.ok:
+        if total_ms is None:
+            LOG.info(
+                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s observations=%s",
+                project_id,
+                intent_id,
+                worker_name,
+                source,
+                phase_ms,
+                len(observations),
+            )
+        else:
+            LOG.info(
+                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s total_ms=%s observations=%s",
+                project_id,
+                intent_id,
+                worker_name,
+                source,
+                phase_ms,
+                total_ms,
+                len(observations),
+            )
+        return "success"
+    if response.status_code == 403:
+        LOG.info(
+            "project became inactive during conclude project=%s intent=%s worker=%s",
+            project_id,
+            intent_id,
+            worker_name,
+        )
+    else:
+        LOG.warning(
+            "conclude write failed project=%s intent=%s worker=%s status=%s body=%s",
+            project_id,
+            intent_id,
+            worker_name,
+            response.status_code,
+            response.text,
+        )
+    best_effort_release(client, project_id, intent_id, worker_name)
+    return "failed"
+
+
 def write_conclude_result(
     client: CairnClient,
     project_id: str,

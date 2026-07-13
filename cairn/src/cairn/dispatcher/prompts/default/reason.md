@@ -1,8 +1,25 @@
 # Task
-You will receive a YAML snapshot of the task graph. In the YAML graph, facts represent key objective facts, and intents represent exploration intents. The graph always moves from one or more facts to a new fact by proposing an intent for exploration. You need to interpret the graph information, understand the overall situation and progress, then become an expert in this domain.
+You will receive a YAML snapshot of the task graph. In the YAML graph, facts represent key objective facts and intents represent exploration intents. The graph always moves from one or more facts to a new fact by proposing an intent for exploration. You need to interpret the graph information, understand the overall situation and progress, then become an expert in this domain.
 You need to judge two things:
 1. Whether the current facts already satisfy Goal
 2. If not, whether new intents should currently be proposed
+
+# Fact Types and Confidence
+Each fact may have a `type` field classifying it:
+- `source`: untrusted input entry point
+- `sink`: dangerous operation (exec, deserialize, template injection, etc.)
+- `dataflow`: a confirmed source→sink path segment
+- `constraint`: negative evidence / blocker (auth, filter, WAF, unreachable)
+- `verification`: runtime verification result
+
+Each fact may have an `effective_confidence` field indicating how certain it is:
+- `hypothesized`: static suspicion, unconfirmed
+- `static-confirmed`: confirmed at code level
+- `reachable-confirmed`: runtime confirmed reachable
+- `poc-confirmed`: runtime exploit confirmed with PoC
+- `refuted`: runtime disproved
+
+A `stale: true` flag means the fact was previously verified but code has since changed.
 
 # Output Requirements
 Return only one raw JSON object. Do not output anything else. The JSON must be valid, including proper escaping of quotation marks.
@@ -28,8 +45,9 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 ```
 
 ## Rules
-- First determine whether the facts already satisfy Goal. If they do, `data.complete.from` must come from `Valid facts`, and `data.complete.description` must explain why the currently confirmed results are sufficient to prove that Goal has been achieved.
-- If Goal is not satisfied, reflect on why it has not been reached, whether the task has drifted into the wrong direction, and whether a correct Intent should be proposed to course-correct.
+- First determine whether the facts already satisfy Goal. For code audit goals (e.g. "unauth RCE"), Goal is satisfied when a chain from source to sink reaches `poc-confirmed` effective confidence (or when a human Hint explicitly confirms the chain). If no runtime verification is available, the chain must at minimum have `static-confirmed` source→sink dataflow with a clear attack surface analysis.
+- If Goal is not satisfied, reflect on why it has not been reached. Consider the confidence levels of discovered facts: static-confirmed facts may need verification; hypothesized facts may need deeper exploration; refuted paths should not be reinvestigated.
+- Use fact `type` to reason about the attack surface: `source` nodes define entry points, `sink` nodes define exploitation targets, `dataflow` nodes connect them, `constraint` nodes are obstacles that may need bypassing.
 - Determine whether there are `Open Intents`, meaning intents that have already been declared but have not yet reached a conclusion. If there are open intents, compare the known clues in hints and facts to infer whether the current intents already cover all known clues, and whether new intents are necessary.
 - If `Open Intents` is empty, you must propose new intents.
 - If there are many `Open Intents` and the new situation does not reveal a more valuable exploration direction than the existing ones, you may choose not to propose any new intent (return empty data).

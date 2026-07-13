@@ -56,8 +56,8 @@ PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
 MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "healthcheck": frozenset({"ok", "fail"}),
     "reason": frozenset({"complete", "intent", "noop", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_execute": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
-    "explore_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "explore_execute": frozenset({"fact", "observations", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "explore_conclude": frozenset({"fact", "observations", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
 }
@@ -82,7 +82,8 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
     "explore_execute": {
         "delay": [0.05, 0.3],
         "outcomes": {
-            "fact": "1.0",
+            "fact": "0.8",
+            "observations": "0.2",
             "rejected": "0.0",
             "invalid_json": "0.0",
             "invalid_payload": "0.0",
@@ -92,7 +93,8 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
     "explore_conclude": {
         "delay": [0.05, 0.3],
         "outcomes": {
-            "fact": "1.0",
+            "fact": "0.8",
+            "observations": "0.2",
             "rejected": "0.0",
             "invalid_json": "0.0",
             "invalid_payload": "0.0",
@@ -292,6 +294,8 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
     behavior: dict[str, dict[str, Any]] = {}
     for phase, allowed_outcomes in MOCK_ALLOWED_OUTCOMES.items():
         prefix = _mock_env_prefix(phase)
+        raw_env_value = env.get(prefix)
+        user_specified = raw_env_value is not None
         payload = _parse_mock_phase_payload(worker_name, env, prefix, MOCK_DEFAULT_BEHAVIOR[phase])
         min_delay, max_delay = _parse_mock_delay_range(worker_name, prefix, payload.get("delay"))
         if max_delay < min_delay:
@@ -305,12 +309,15 @@ def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, di
         outcomes: dict[str, float] = {}
         total = Decimal("0")
         for outcome in sorted(allowed_outcomes):
-            weight = _parse_mock_probability(
-                worker_name,
-                prefix,
-                raw_outcomes,
-                outcome,
-            )
+            if user_specified and outcome not in raw_outcomes:
+                weight = Decimal("0")
+            else:
+                weight = _parse_mock_probability(
+                    worker_name,
+                    prefix,
+                    raw_outcomes,
+                    outcome,
+                )
             outcomes[outcome] = float(weight)
             total += weight
         if total != Decimal("1"):

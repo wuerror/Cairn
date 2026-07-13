@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS facts (
     id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     description TEXT NOT NULL,
+    type TEXT,
+    confidence TEXT,
+    locations TEXT,
+    code_version TEXT,
+    evidence TEXT,
+    verifies TEXT,
+    intent_id TEXT,
+    batch_id TEXT,
     PRIMARY KEY (id, project_id)
 );
 
@@ -91,6 +99,7 @@ def configure(path: Path) -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
         _ensure_project_columns(conn)
+        _ensure_fact_columns(conn)
 
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:
@@ -101,6 +110,23 @@ def _ensure_project_columns(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE projects SET bootstrap_enabled = CASE WHEN bootstrap_mode = 'disabled' THEN 0 ELSE 1 END"
             )
+
+
+def _ensure_fact_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(facts)")}
+    new_columns = [
+        ("type", "TEXT"),
+        ("confidence", "TEXT"),
+        ("locations", "TEXT"),
+        ("code_version", "TEXT"),
+        ("evidence", "TEXT"),
+        ("verifies", "TEXT"),
+        ("intent_id", "TEXT"),
+        ("batch_id", "TEXT"),
+    ]
+    for col_name, col_type in new_columns:
+        if col_name not in columns:
+            conn.execute(f"ALTER TABLE facts ADD COLUMN {col_name} {col_type}")
 
 
 @contextmanager
