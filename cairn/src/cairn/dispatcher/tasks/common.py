@@ -190,22 +190,30 @@ def write_conclude_result_with_observations(
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
+    base_knowledge_patches: list[dict] | None = None,
 ) -> str:
-    response = client.conclude_observations(project_id, intent_id, worker_name, observations)
+    response = client.conclude_observations(
+        project_id,
+        intent_id,
+        worker_name,
+        observations,
+        base_knowledge_patches=base_knowledge_patches,
+    )
     if response.ok:
         if total_ms is None:
             LOG.info(
-                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s observations=%s",
+                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s observations=%s bk_patches=%s",
                 project_id,
                 intent_id,
                 worker_name,
                 source,
                 phase_ms,
                 len(observations),
+                len(base_knowledge_patches or []),
             )
         else:
             LOG.info(
-                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s total_ms=%s observations=%s",
+                "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s total_ms=%s observations=%s bk_patches=%s",
                 project_id,
                 intent_id,
                 worker_name,
@@ -213,6 +221,7 @@ def write_conclude_result_with_observations(
                 phase_ms,
                 total_ms,
                 len(observations),
+                len(base_knowledge_patches or []),
             )
         return "success"
     if response.status_code == 403:

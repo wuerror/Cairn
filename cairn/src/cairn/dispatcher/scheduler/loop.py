@@ -217,12 +217,12 @@ class DispatcherLoop:
                 return False
             if self._project_requires_bootstrap(project):
                 return self._dispatch_initial_project(project)
-            export_yaml = self.client.export_project(summary.id)
+            export_yaml = self.client.export_relevant_subgraph(summary.id)
             return self._dispatch_reason(project, export_yaml, "initial")
         if project.project.reason is None:
             reason_trigger = self._reason_trigger(project)
             if reason_trigger is not None:
-                export_yaml = self.client.export_project(summary.id)
+                export_yaml = self.client.export_relevant_subgraph(summary.id)
                 return self._dispatch_reason(project, export_yaml, reason_trigger)
         running_intent_ids = self._project_running_explore_intents(summary.id)
         unclaimed_intents = [

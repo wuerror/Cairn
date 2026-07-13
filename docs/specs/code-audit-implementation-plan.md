@@ -100,33 +100,35 @@
 **目标：同一 codebase 多 goal 复用，Reason 不再吃全量图。** 仍不发包。
 
 ### P1.1 结构边与子图检索（决策 #4/#12）
-- [ ] `server/services.py`：实现 `relevant_subgraph(project, goal)`：
+- [x] `server/services.py`：实现 `relevant_subgraph(project, goal)`：
   1. goal → 终态 sink 类型：**v1 小映射表**（`RCE→{exec,deserialize,ssti,template}` 等）+ sink `description` 关键词兜底；
   2. 从匹配 sink 沿 **Intent provenance（`from[]→to`，即 `intent_sources`+`to_fact_id`）反向 BFS N 跳**；`type` 只作节点标签；
   3. 结果按 **有效 confidence 过滤掉已 `refuted` 路径**，再按 `batch_id` 附上同批附属 fact（`source`/`constraint`）。
-- [ ] server 暴露 `relevant_subgraph` 接口；`reason` 任务取数从"全量 export"切到该接口。**接口 P0 就可先存在并返回全部**（决策 #4），P1 换实现、不动 prompt。
-- [ ] `dispatcher/tasks/reason.py` & `prompts/default/reason.md`：`{graph_yaml}` 来源改为子图切片。
+  4. **fail-closed**：有 typed sinks 但 goal 关键词无一命中时，**不** seed 全部 sink；仅返回 `origin/goal` + constraints + 触及它们的 open intents（避免跨 run 后 goal #2 吃到无关 sink 图）。
+- [x] server 暴露 `relevant_subgraph` 接口；`reason` 任务取数从"全量 export"切到该接口。**接口 P0 就可先存在并返回全部**（决策 #4），P1 换实现、不动 prompt。
+- [x] `dispatcher/tasks/reason.py` & `prompts/default/reason.md`：`{graph_yaml}` 来源改为子图切片。
 
 ### P1.2 持久化 + 防腐（决策 #3，设计要点 5，已知限制 5）
-- [ ] 存储：fact 以 `file:line + code_version` 为持久键，跨 run 累积；goal 用 tag/filter 表达（**v1 不拆表**）。
-- [ ] 折叠视图消费 `code_version` 失配 → 节点降 `stale`/待重验（视图计算，存储不动）。
-- [ ] 跨 run 去重升级为硬需求：写入前按 canonical key 查已存在 fact。
+- [x] 存储：跨 run 为 **copy-on-create**（同 `codebase.path` 的 sibling project 建项时导入 facts + intent 脊柱 + 空目标的 base_knowledge），**非** live shared store；canonical 去重键为 `type + sorted(locations)`；goal 用 project 级 goal fact 表达（**v1 不拆表**）。
+- [x] 折叠视图：`stale` = **verification_stale only**——仅当指向该节点的 verification 因 `code_version` 失配过期时标 stale 并回落自身档位；无 verification 的静态节点即使 own `code_version` 与当前 commit 不同也不标 stale。
+- [x] 跨 run 去重升级为硬需求：写入前按 canonical key 查已存在 fact。
 
 ### P1.3 基座知识层（设计要点 1/2/3，第二存储约束）
-- [ ] 新增 `base_knowledge` 存储（**协议外第二存储，非图节点**）：`version` + `entries[]`(kind/statement/evidence/confidence/revised_by) + `routing_map`。
-- [ ] `bootstrap` 任务产出基座（`prompts/default/bootstrap*.md` 扩语义）；worker 只读、带 `version`。
-- [ ] **patch 规则**：`revised_by` 必须由冲突 fact 触发并留审计（谁/因哪条 fact/何时）；worker 执行中 `version` 变了要在 conclude 前重拉。
-- [ ] `kind: auth` 条目支持"早期接地"占位（P2 才真接地）。
+- [x] 新增 `base_knowledge` 存储（**协议外第二存储，非图节点**）：`version` + `entries[]`(kind/statement/evidence/confidence/revised_by) + `routing_map`。
+- [x] `bootstrap` 任务产出基座（`prompts/default/bootstrap*.md` 扩语义）；worker 只读、带 `version`。
+- [x] **patch 规则**：`revised_by` 必须由冲突 fact 触发并留审计（谁/因哪条 fact/何时）；worker 执行中 `version` 变了要在 conclude 前重拉。
+- [x] **explore → BK patch 最小闭环**：explore emit 可选 `base_knowledge_patches[{entry_id, statement?, evidence?, confidence?}]`（不填 `revised_by`/`version`）；conclude 后 server 用本批主 fact 作 `revised_by` 调 PATCH；非法 `entry_id` skip 不回滚 facts。
+- [x] `kind: auth` 条目支持"早期接地"占位（P2 才真接地）。
 
 ### P1.4 测试
-- [ ] 反向可达遍历正确（含 constraint、剔除 refuted）；跨 run 复用不重建；基座 patch 审计链完整。
+- [x] 反向可达遍历正确（含 constraint、剔除 refuted）；关键词 miss fail-closed；跨 run 复用不重建；基座 patch 审计链完整；conclude 带 patches；verification 过期才 stale。
 
 ### P1.5 前端（`server/static/index.html`）
-- [ ] **基座知识 / routing_map 面板（图外第二存储，UI 今天完全没有）。** 新 tab/面板显 `base_knowledge.entries`（kind/statement/evidence/confidence/revised_by）+ `routing_map`，并显 `version` 与 `revised_by` 审计链（谁/因哪条 fact/何时）。
-- [ ] **按 goal 过滤/高亮子图。** Reason 现在吃 `relevant_subgraph`；跨 run 大图会糊，UI 加"聚焦当前 goal 相关子图"开关（前端过滤或调用 `relevant_subgraph` 接口）。
-- [ ] **`stale` 节点显式标记。** 代码变动后待重验的节点在图上要有别于正常节点。
+- [x] **基座知识 / routing_map 面板（图外第二存储，UI 今天完全没有）。** 新 tab/面板显 `base_knowledge.entries`（kind/statement/evidence/confidence/revised_by）+ `routing_map`，并显 `version` 与 `revised_by` 审计链（谁/因哪条 fact/何时）。
+- [x] **按 goal 过滤/高亮子图。** Reason 现在吃 `relevant_subgraph`；跨 run 大图会糊，UI 加"聚焦当前 goal 相关子图"开关（前端过滤或调用 `relevant_subgraph` 接口）。
+- [x] **`stale` 节点显式标记。** verification 过期待重验的节点在图上要有别于正常节点。
 
-**P1 出口判据**：goal #2 的 Reason 只看相关子图、复用 goal #1 已确认 fact、不重挖；代码变动后旧 fact 自动降 stale；**UI 能查看基座/routing_map 及其 revised_by 审计链，能按 goal 聚焦子图**。
+**P1 出口判据**：goal #2 的 Reason 只看相关子图（关键词 miss 时 fail-closed、不 seed 全部 sink）、复用 goal #1 已确认 fact（copy-on-create + 硬去重）、不重挖；verification 过期后节点降 stale；explore 可 patch 冲突基座并留审计；**UI 能查看基座/routing_map 及其 revised_by 审计链，能按 goal 聚焦子图**。
 
 ---
 

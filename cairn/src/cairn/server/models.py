@@ -83,11 +83,96 @@ class ProjectSummary(ProjectMeta):
     hint_count: int
 
 
+BaseKnowledgeKind = Literal["architecture", "auth", "routing", "trust_boundary", "convention"]
+BaseKnowledgeConfidence = Literal["assumed", "code-confirmed", "live-confirmed"]
+RoutingVia = Literal["direct", "gateway_rewrite", "spa_route"]
+
+
+class BaseKnowledgePatchEmit(BaseModel):
+    """Narrow-waist patch from explore: model never fills revised_by/version."""
+    entry_id: str
+    statement: str | None = None
+    evidence: list[str] | None = None
+    confidence: BaseKnowledgeConfidence | None = None
+
+    @field_validator("entry_id")
+    @classmethod
+    def validate_entry_id(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class BaseKnowledgeEntry(BaseModel):
+    id: str
+    kind: BaseKnowledgeKind
+    statement: str
+    evidence: list[str] = Field(default_factory=list)
+    confidence: BaseKnowledgeConfidence = "assumed"
+    revised_by: str | None = None
+
+
+class RoutingMapEntry(BaseModel):
+    src: str
+    live: str
+    via: RoutingVia = "direct"
+    confidence: BaseKnowledgeConfidence = "assumed"
+
+
+class BaseKnowledgeAudit(BaseModel):
+    entry_id: str
+    revised_by: str | None = None
+    actor: str
+    action: str
+    at: str
+
+
+class BaseKnowledge(BaseModel):
+    version: int = 0
+    entries: list[BaseKnowledgeEntry] = Field(default_factory=list)
+    routing_map: list[RoutingMapEntry] = Field(default_factory=list)
+    audit: list[BaseKnowledgeAudit] = Field(default_factory=list)
+
+
+class PutBaseKnowledgeRequest(BaseModel):
+    entries: list[BaseKnowledgeEntry] = Field(default_factory=list)
+    routing_map: list[RoutingMapEntry] = Field(default_factory=list)
+    expected_version: int | None = None
+    actor: str = "worker"
+
+    @field_validator("actor")
+    @classmethod
+    def validate_actor(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class PatchBaseKnowledgeEntryRequest(BaseModel):
+    statement: str | None = None
+    evidence: list[str] | None = None
+    confidence: BaseKnowledgeConfidence | None = None
+    revised_by: str
+    actor: str = "worker"
+    expected_version: int | None = None
+
+    @field_validator("revised_by", "actor")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
 class ProjectDetail(BaseModel):
     project: ProjectMeta
     facts: list[Fact]
     intents: list[Intent]
     hints: list[Hint]
+    base_knowledge: BaseKnowledge | None = None
 
 
 class CreateHintInline(BaseModel):
@@ -218,6 +303,7 @@ class ConcludeRequest(BaseModel):
     worker: str
     description: str | None = None
     observations: list[Observation] | None = None
+    base_knowledge_patches: list[BaseKnowledgePatchEmit] | None = None
 
     @field_validator("worker")
     @classmethod

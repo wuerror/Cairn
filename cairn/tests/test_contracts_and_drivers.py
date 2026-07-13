@@ -53,6 +53,49 @@ def test_explore_payload_rejects_planning_text() -> None:
         validate_explore_payload(parse_json_output("Need inspect files and keep working."))
 
 
+def test_explore_payload_accepts_base_knowledge_patches() -> None:
+    kind, emit = validate_explore_payload(
+        {
+            "accepted": True,
+            "data": {
+                "observations": [
+                    {
+                        "type": "constraint",
+                        "description": "import skips auth",
+                        "locations": ["a.py:1"],
+                    }
+                ],
+                "base_knowledge_patches": [
+                    {
+                        "entry_id": "bk001",
+                        "statement": "auth is per-route with exception",
+                        "confidence": "code-confirmed",
+                    }
+                ],
+            },
+        }
+    )
+    assert kind == "observations"
+    assert emit is not None
+    assert len(emit["observations"]) == 1
+    assert emit["base_knowledge_patches"][0]["entry_id"] == "bk001"
+
+
+def test_explore_payload_rejects_live_confirmed_patch() -> None:
+    with pytest.raises(ValueError, match="assumed or code-confirmed"):
+        validate_explore_payload(
+            {
+                "accepted": True,
+                "data": {
+                    "observations": [{"description": "x"}],
+                    "base_knowledge_patches": [
+                        {"entry_id": "bk001", "confidence": "live-confirmed"}
+                    ],
+                },
+            }
+        )
+
+
 def test_pi_driver_extracts_session_and_last_assistant_text() -> None:
     driver = PiDriver()
     stdout = "\n".join(

@@ -567,6 +567,14 @@
       </div>
 
       <div id="cy" class="relative z-0 flex-1 h-full">
+        <div class="absolute top-3 left-3 z-10 flex gap-1.5" x-show="project && project.facts">
+          <button type="button" @click="toggleGoalFocus()"
+            class="px-2.5 py-1.5 bg-white/90 backdrop-blur border rounded-lg shadow-sm text-[11px] font-medium transition flex items-center gap-1"
+            :class="focusGoalSubgraph ? 'border-brand-300 text-brand-700 bg-brand-50' : 'border-slate-200 text-slate-600 hover:bg-slate-50'">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+            <span x-text="focusGoalSubgraph ? 'Goal focus ON' : 'Focus goal subgraph'"></span>
+          </button>
+        </div>
         <div class="absolute bottom-3 left-3 z-10 bg-white/90 backdrop-blur rounded-xl border border-slate-200 shadow-sm p-2.5 text-[10px] space-y-1" x-show="project && project.facts">
           <div class="text-slate-400 font-semibold mb-1.5 uppercase tracking-wider">Legend</div>
           <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-teal-500 shrink-0"></span><span class="text-slate-600">origin</span></div>
@@ -576,6 +584,7 @@
           <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-violet-500 border border-violet-600 shrink-0"></span><span class="text-slate-600">dataflow</span></div>
           <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-red-50 border border-dashed border-red-400 shrink-0"></span><span class="text-slate-600">constraint</span></div>
           <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full bg-emerald-500 border border-emerald-600 shrink-0"></span><span class="text-slate-600">verification</span></div>
+          <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-slate-200 border border-dotted border-slate-400 shrink-0"></span><span class="text-slate-600">stale</span></div>
           <hr class="border-slate-100 my-0.5">
           <div class="text-slate-300 text-[9px]">Border = confidence level</div>
         </div>
@@ -589,13 +598,17 @@
     <!-- Side panel -->
     <div class="border-l border-slate-200/60 bg-white flex flex-col overflow-hidden shrink-0 relative z-20" :style="{ width: sidePanelWidth + 'px', minWidth: sidePanelWidth + 'px', flexBasis: sidePanelWidth + 'px' }">
       <div class="flex border-b border-slate-100 shrink-0">
-        <button @click="sideTab = 'detail'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+        <button @click="sideTab = 'detail'" class="flex-1 px-2 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'detail' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Detail</button>
-        <button @click="sideTab = 'hints'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+        <button @click="sideTab = 'knowledge'" class="flex-1 px-2 py-2.5 text-xs font-medium transition"
+          :class="sideTab === 'knowledge' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
+          Base <span class="ml-0.5 text-[10px] opacity-60" x-text="baseKnowledgeEntryCount()"></span>
+        </button>
+        <button @click="sideTab = 'hints'" class="flex-1 px-2 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'hints' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
           Hints <span class="ml-0.5 text-[10px] opacity-60" x-text="project.hints.length"></span>
         </button>
-        <button @click="sideTab = 'log'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+        <button @click="sideTab = 'log'" class="flex-1 px-2 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Log</button>
       </div>
 
@@ -772,6 +785,92 @@
             </div>
           </section>
         </template>
+      </div>
+
+      <!-- Base knowledge (second storage, not graph nodes) -->
+      <div x-show="sideTab === 'knowledge'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/40">
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80 flex items-center justify-between gap-2">
+            <div>
+              <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Base Knowledge</p>
+              <p class="text-[11px] text-slate-500 mt-0.5">Protocol-external second storage</p>
+            </div>
+            <span class="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-slate-100 text-slate-600"
+              x-text="`v${(project.base_knowledge && project.base_knowledge.version) || 0}`"></span>
+          </div>
+          <div class="p-4 space-y-3">
+            <template x-if="!project.base_knowledge || !project.base_knowledge.entries || project.base_knowledge.entries.length === 0">
+              <p class="text-sm text-slate-300 text-center py-4">No base knowledge yet</p>
+            </template>
+            <template x-for="entry in (project.base_knowledge && project.base_knowledge.entries) || []" :key="entry.id">
+              <article class="rounded-xl border border-slate-100 bg-slate-50/60 p-3 space-y-1.5">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-white text-slate-600 border border-slate-200" x-text="entry.id"></span>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-50 text-indigo-700" x-text="entry.kind"></span>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-600" x-text="entry.confidence"></span>
+                </div>
+                <p class="text-sm text-slate-700 leading-relaxed" x-text="entry.statement"></p>
+                <template x-if="entry.evidence && entry.evidence.length">
+                  <div>
+                    <template x-for="ev in entry.evidence" :key="ev">
+                      <div class="font-mono text-[10px] text-slate-500 bg-white rounded px-1.5 py-0.5 mb-0.5 border border-slate-100" x-text="ev"></div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="entry.revised_by">
+                  <p class="text-[11px] text-amber-700">revised_by <span class="font-mono" x-text="entry.revised_by"></span></p>
+                </template>
+              </article>
+            </template>
+          </div>
+        </section>
+
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+            <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Routing Map</p>
+          </div>
+          <div class="p-4 space-y-2">
+            <template x-if="!project.base_knowledge || !project.base_knowledge.routing_map || project.base_knowledge.routing_map.length === 0">
+              <p class="text-sm text-slate-300 text-center py-3">No routes mapped</p>
+            </template>
+            <template x-for="(route, idx) in (project.base_knowledge && project.base_knowledge.routing_map) || []" :key="idx">
+              <div class="rounded-xl border border-slate-100 bg-slate-50/60 p-3 text-xs space-y-1">
+                <div class="font-mono text-[10px] text-slate-500 break-all" x-text="route.src"></div>
+                <div class="text-slate-700 font-medium" x-text="route.live"></div>
+                <div class="flex gap-1.5">
+                  <span class="px-1.5 py-0.5 rounded text-[10px] bg-white border border-slate-200 text-slate-600" x-text="route.via"></span>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] bg-white border border-slate-200 text-slate-600" x-text="route.confidence"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+            <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">revised_by Audit</p>
+          </div>
+          <div class="p-4 space-y-2">
+            <template x-if="!project.base_knowledge || !project.base_knowledge.audit || project.base_knowledge.audit.length === 0">
+              <p class="text-sm text-slate-300 text-center py-3">No patches yet</p>
+            </template>
+            <template x-for="(item, idx) in (project.base_knowledge && project.base_knowledge.audit) || []" :key="idx">
+              <div class="rounded-xl border border-slate-100 bg-slate-50/60 p-3 text-[11px] space-y-1">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="font-mono text-slate-600" x-text="item.entry_id"></span>
+                  <span class="text-slate-400 tabular-nums" x-text="formatTime(item.at)"></span>
+                </div>
+                <div class="text-slate-600">
+                  <span x-text="item.action"></span>
+                  by <span class="font-medium" x-text="item.actor"></span>
+                  <template x-if="item.revised_by">
+                    <span> · fact <span class="font-mono" x-text="item.revised_by"></span></span>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+        </section>
       </div>
 
       <!-- Hints -->
@@ -1148,6 +1247,8 @@ function cairnApp() {
     pollTimer: null,
     cy: null,
     sideTab: 'detail',
+    focusGoalSubgraph: false,
+    goalSubgraphFactIds: null,
     selectedNode: null,
     selectedFacts: [],
     selectedTimelineEntryId: null,
@@ -1653,7 +1754,34 @@ function cairnApp() {
     },
 
     async loadProject(id) {
-      try { this.project = await this.api('GET', `/projects/${id}`); } catch(e) { this.showToast(e.message, 'error'); }
+      try {
+        this.project = await this.api('GET', `/projects/${id}`);
+        if (this.focusGoalSubgraph) await this.refreshGoalSubgraph(id);
+      } catch(e) { this.showToast(e.message, 'error'); }
+    },
+
+    baseKnowledgeEntryCount() {
+      return (this.project?.base_knowledge?.entries || []).length;
+    },
+
+    async refreshGoalSubgraph(projectId) {
+      try {
+        const data = await this.api('GET', `/projects/${projectId}/relevant_subgraph?format=json`);
+        this.goalSubgraphFactIds = new Set(data.fact_ids || []);
+      } catch (e) {
+        this.goalSubgraphFactIds = null;
+        console.error(e);
+      }
+    },
+
+    async toggleGoalFocus() {
+      this.focusGoalSubgraph = !this.focusGoalSubgraph;
+      if (this.focusGoalSubgraph && this.selectedProjectId) {
+        await this.refreshGoalSubgraph(this.selectedProjectId);
+      } else {
+        this.goalSubgraphFactIds = null;
+      }
+      this.updateGraph();
     },
 
     async toggleProjectStop() {
@@ -2208,8 +2336,12 @@ function cairnApp() {
     buildElements() {
       const nodes = [];
       const edges = [];
-      const factById = Object.fromEntries(this.project.facts.map(f => [f.id, f]));
-      for (const f of this.project.facts) {
+      const focusIds = this.focusGoalSubgraph ? this.goalSubgraphFactIds : null;
+      const visibleFacts = focusIds
+        ? this.project.facts.filter(f => focusIds.has(f.id))
+        : this.project.facts;
+      const visibleFactIdSet = new Set(visibleFacts.map(f => f.id));
+      for (const f of visibleFacts) {
         const nodeType = f.id === 'origin' ? 'origin' : f.id === 'goal' ? 'goal' : this.factNodeType(f);
         const label = this.summarizeFactLabel(f);
         const size = this.factNodeSize(label, nodeType);
@@ -2226,11 +2358,11 @@ function cairnApp() {
         }});
       }
       const intentToFacts = Object.fromEntries(
-        this.project.intents.filter(i => i.to).map(i => [i.to, i])
+        this.project.intents.filter(i => i.to && visibleFactIdSet.has(i.to)).map(i => [i.to, i])
       );
-      for (const f of this.project.facts) {
+      for (const f of visibleFacts) {
         if (f.batch_id && !intentToFacts[f.id] && f.id !== 'origin' && f.id !== 'goal') {
-          const mainFact = this.project.facts.find(
+          const mainFact = visibleFacts.find(
             mf => mf.batch_id === f.batch_id && mf.id !== f.id && intentToFacts[mf.id]
           );
           if (mainFact) {
@@ -2243,9 +2375,17 @@ function cairnApp() {
         }
       }
       for (const intent of this.project.intents) {
+        if (focusIds && intent.to && !focusIds.has(intent.to) && !intent.from.some(s => focusIds.has(s))) {
+          continue;
+        }
+        if (focusIds && !intent.to && !intent.from.some(s => focusIds.has(s))) {
+          continue;
+        }
         const lbl = intent.description;
         if (intent.to) {
+          if (!visibleFactIdSet.has(intent.to)) continue;
           for (const src of intent.from) {
+            if (!visibleFactIdSet.has(src)) continue;
             edges.push({ data: { id: `${intent.id}_${src}`, source: src, target: intent.to, intentId: intent.id, label: lbl, status: 'concluded' }});
           }
         } else {
@@ -2262,9 +2402,10 @@ function cairnApp() {
             height: nodeSize.height,
           }});
           for (const src of intent.from) {
+            if (!visibleFactIdSet.has(src)) continue;
             edges.push({ data: { id: `${intent.id}_${src}`, source: src, target: phId, intentId: intent.id, label: lbl, status: nodeType }});
           }
-          if (this.isBootstrapIntent(intent)) {
+          if (this.isBootstrapIntent(intent) && visibleFactIdSet.has('goal')) {
             edges.push({ data: { id: `${intent.id}_goal`, source: phId, target: 'goal', intentId: intent.id, label: '', status: nodeType, edgeType: 'bootstrap_scope' }});
           }
         }
@@ -2303,7 +2444,7 @@ function cairnApp() {
         { selector: 'node[nodeType="fact_dataflow"]', style: { ...common, shape:'round-rectangle','background-color':'#8b5cf6',label:'data(label)',color:'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#7c3aed' }},
         { selector: 'node[nodeType="fact_constraint"]', style: { ...common, shape:'round-rectangle','background-color':'#fef2f2','background-opacity':0.96,label:'data(label)',color:'#b91c1c','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#ef4444','border-style':'dashed' }},
         { selector: 'node[nodeType="fact_verification"]', style: { ...common, shape:'ellipse','background-color':'#10b981',label:'data(label)',color:'#fff','font-size':'9px','font-weight':'bold','text-wrap':'wrap','text-max-width':'100px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':1.5,'border-color':'#059669' }},
-        { selector: 'node[stale="true"]', style: { 'border-color':'#94a3b8','border-style':'dotted','border-width':2 }},
+        { selector: 'node[stale="true"]', style: { 'border-color':'#94a3b8','border-style':'dotted','border-width':3,'opacity':0.55,'background-blacken':0.15 }},
         { selector: 'node[confidence="poc-confirmed"]', style: { 'border-width':3,'border-color':'#059669' }},
         { selector: 'node[confidence="reachable-confirmed"]', style: { 'border-width':2.5,'border-color':'#0284c7' }},
         { selector: 'node[confidence="static-confirmed"]', style: { 'border-width':2,'border-color':'#6366f1' }},

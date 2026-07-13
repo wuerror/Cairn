@@ -13,7 +13,25 @@ When rejecting a task, return the following (under no circumstances should you r
 
 Normal return example:
 ```json
-{"accepted": true, "data": {"fact": {"description": "..."}}}
+{
+  "accepted": true,
+  "data": {
+    "fact": {"description": "..."},
+    "base_knowledge": {
+      "entries": [
+        {
+          "id": "bk001",
+          "kind": "architecture|auth|routing|trust_boundary|convention",
+          "statement": "One-sentence conclusion",
+          "evidence": ["file:line"],
+          "confidence": "assumed|code-confirmed",
+          "revised_by": null
+        }
+      ],
+      "routing_map": []
+    }
+  }
+}
 ```
 
 ## Rules
@@ -23,6 +41,7 @@ Normal return example:
 - This JSON summary is your final output for this phase. After outputting it, stop.
 - Do not output `complete` in this phase. Even if Goal is not achieved or you want to explain status, put that information into `fact.description` only.
 - `fact.description` must be an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler.
+- Optionally include `base_knowledge` if you already confirmed architecture/auth/routing facts during the session.
 - Do not put long data blobs in `fact.description`. Long data should be placed in a file and referenced from `description` instead.
 
 # Context

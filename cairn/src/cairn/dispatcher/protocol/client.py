@@ -72,6 +72,68 @@ class CairnClient:
         response.raise_for_status()
         return response.text
 
+    def export_relevant_subgraph(self, project_id: str, max_hops: int = 8) -> str:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/relevant_subgraph"),
+            params={"format": "yaml", "max_hops": max_hops},
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return response.text
+
+    def get_base_knowledge(self, project_id: str) -> dict:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/base_knowledge"),
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def put_base_knowledge(
+        self,
+        project_id: str,
+        *,
+        entries: list[dict],
+        routing_map: list[dict] | None = None,
+        expected_version: int | None = None,
+        actor: str = "worker",
+    ) -> ApiResult:
+        payload: dict[str, Any] = {
+            "entries": entries,
+            "routing_map": routing_map or [],
+            "actor": actor,
+        }
+        if expected_version is not None:
+            payload["expected_version"] = expected_version
+        return self._request_json("PUT", f"/projects/{project_id}/base_knowledge", json=payload)
+
+    def patch_base_knowledge_entry(
+        self,
+        project_id: str,
+        entry_id: str,
+        *,
+        revised_by: str,
+        actor: str = "worker",
+        statement: str | None = None,
+        evidence: list[str] | None = None,
+        confidence: str | None = None,
+        expected_version: int | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {"revised_by": revised_by, "actor": actor}
+        if statement is not None:
+            payload["statement"] = statement
+        if evidence is not None:
+            payload["evidence"] = evidence
+        if confidence is not None:
+            payload["confidence"] = confidence
+        if expected_version is not None:
+            payload["expected_version"] = expected_version
+        return self._request_json(
+            "PATCH",
+            f"/projects/{project_id}/base_knowledge/entries/{entry_id}",
+            json=payload,
+        )
+
     def heartbeat(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
         return self._request_json(
             "POST",
@@ -114,11 +176,21 @@ class CairnClient:
             json={"worker": worker, "description": description},
         )
 
-    def conclude_observations(self, project_id: str, intent_id: str, worker: str, observations: list[dict]) -> ApiResult:
+    def conclude_observations(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        observations: list[dict],
+        base_knowledge_patches: list[dict] | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {"worker": worker, "observations": observations}
+        if base_knowledge_patches:
+            payload["base_knowledge_patches"] = base_knowledge_patches
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents/{intent_id}/conclude",
-            json={"worker": worker, "observations": observations},
+            json=payload,
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:

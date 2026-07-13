@@ -16,6 +16,11 @@ Normal return example (rich observation format):
 {"accepted": true, "data": {"observations": [{"type": "sink", "description": "yaml.load uses unsafe Loader at app/config_loader.py:19", "locations": ["app/config_loader.py:19"]}]}}
 ```
 
+When confirmed findings conflict with `base_knowledge`, also emit patches against existing entry ids only:
+```json
+{"accepted": true, "data": {"observations": [{"type": "constraint", "description": "import_bp skips @login_required", "locations": ["app/api/import_bp.py:31"]}], "base_knowledge_patches": [{"entry_id": "bk001", "statement": "Most routes use @login_required; import_bp is an exception", "confidence": "code-confirmed"}]}}
+```
+
 You may also return a single observation:
 ```json
 {"accepted": true, "data": {"description": "..."}}
@@ -30,6 +35,7 @@ You may also return a single observation:
 - `locations` is a list of `file:line` strings pinpointing code evidence. Be precise.
 - `description` must be an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler. Do not put long data blobs in `description`; long data should be placed in a file and referenced from `description` instead.
 - `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
+- If findings contradict a `base_knowledge` entry, include `base_knowledge_patches` with existing `entry_id` only. Fill `statement` / `evidence` / `confidence` (`assumed` or `code-confirmed`). Never fill `revised_by`, `version`, or claim `live-confirmed`.
 
 # Context
 ## Graph

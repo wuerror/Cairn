@@ -2,18 +2,24 @@ from fastapi import APIRouter, HTTPException
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
+    BaseKnowledge,
+    BaseKnowledgeAudit,
+    BaseKnowledgeEntry,
     CompleteRequest,
     CreateProjectRequest,
     Fact,
     Hint,
     HeartbeatRequest,
     Intent,
+    PatchBaseKnowledgeEntryRequest,
     ProjectDetail,
     ProjectMeta,
     ProjectSummary,
+    PutBaseKnowledgeRequest,
     ReopenRequest,
     ReopenResponse,
     ReasonClaimRequest,
+    RoutingMapEntry,
     UpdateProjectTitleRequest,
     UpdateProjectStatusRequest,
 )
@@ -27,17 +33,30 @@ from cairn.server.services import (
     fact_from_row,
     get_completion_intent_or_409,
     get_project_or_404,
+    import_codebase_facts,
     intent_to_model,
+    load_base_knowledge,
     next_fact_id,
     next_hint_id,
     next_intent_id,
     next_project_id,
+    patch_base_knowledge_entry,
     project_meta_from_row,
     project_reason_from_row,
+    save_base_knowledge,
     utcnow,
     validate_facts_exist,
     validate_goal_not_in_sources,
 )
+
+
+def _base_knowledge_model(raw: dict) -> BaseKnowledge:
+    return BaseKnowledge(
+        version=raw.get("version", 0),
+        entries=[BaseKnowledgeEntry.model_validate(e) for e in raw.get("entries") or []],
+        routing_map=[RoutingMapEntry.model_validate(r) for r in raw.get("routing_map") or []],
+        audit=[BaseKnowledgeAudit.model_validate(a) for a in raw.get("audit") or []],
+    )
 
 router = APIRouter(tags=["projects"])
 
@@ -104,6 +123,12 @@ def create_project(body: CreateProjectRequest):
                 )
                 hints.append(Hint(id=hid, content=h.content, creator=h.creator, created_at=now))
 
+        # Cross-run reuse: seed durable facts from sibling projects on same codebase.path
+        import_codebase_facts(conn, pid, body.origin)
+
+        facts = conn.execute("SELECT * FROM facts WHERE project_id = ?", (pid,)).fetchall()
+        bk = _base_knowledge_model(load_base_knowledge(conn, pid))
+
         return ProjectDetail(
             project=ProjectMeta(
                 id=pid,
@@ -113,12 +138,10 @@ def create_project(body: CreateProjectRequest):
                 created_at=now,
                 reason=None,
             ),
-            facts=[
-                Fact(id="origin", description=body.origin),
-                Fact(id="goal", description=body.goal),
-            ],
-            intents=[],
+            facts=[fact_from_row(f, conn, pid) for f in facts],
+            intents=build_intents(conn, pid),
             hints=hints,
+            base_knowledge=bk,
         )
 
 
@@ -142,7 +165,61 @@ def get_project(project_id: str):
             facts=[fact_from_row(f, conn, project_id) for f in facts],
             intents=build_intents(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            base_knowledge=_base_knowledge_model(load_base_knowledge(conn, project_id)),
         )
+
+
+@router.get("/projects/{project_id}/base_knowledge", response_model=BaseKnowledge)
+def get_base_knowledge(project_id: str):
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        return _base_knowledge_model(load_base_knowledge(conn, project_id))
+
+
+@router.put("/projects/{project_id}/base_knowledge", response_model=BaseKnowledge)
+def put_base_knowledge(project_id: str, body: PutBaseKnowledgeRequest):
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        current = load_base_knowledge(conn, project_id)
+        audit = list(current.get("audit") or [])
+        audit.append({
+            "entry_id": "*",
+            "revised_by": None,
+            "actor": body.actor,
+            "action": "replace",
+            "at": utcnow(),
+        })
+        saved = save_base_knowledge(
+            conn,
+            project_id,
+            entries=[e.model_dump() for e in body.entries],
+            routing_map=[r.model_dump() for r in body.routing_map],
+            audit=audit,
+            expected_version=body.expected_version,
+            actor=body.actor,
+        )
+        return _base_knowledge_model(saved)
+
+
+@router.patch(
+    "/projects/{project_id}/base_knowledge/entries/{entry_id}",
+    response_model=BaseKnowledge,
+)
+def patch_base_knowledge(project_id: str, entry_id: str, body: PatchBaseKnowledgeEntryRequest):
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        saved = patch_base_knowledge_entry(
+            conn,
+            project_id,
+            entry_id,
+            statement=body.statement,
+            evidence=body.evidence,
+            confidence=body.confidence,
+            revised_by=body.revised_by,
+            actor=body.actor,
+            expected_version=body.expected_version,
+        )
+        return _base_knowledge_model(saved)
 
 
 @router.delete("/projects/{project_id}", status_code=204)

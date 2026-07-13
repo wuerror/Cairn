@@ -1,15 +1,19 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from datetime import datetime
 import yaml
 
 from cairn.server.db import get_conn
 from cairn.server.services import (
+    current_codebase_version,
     effective_confidence,
     expire_reason_leases,
     expire_workers,
+    get_origin_description,
     get_project_or_404,
+    load_base_knowledge,
     parse_json_list,
+    relevant_subgraph,
 )
 
 router = APIRouter(tags=["export"])
@@ -53,8 +57,16 @@ def _load_project_data(conn, project_id: str):
     return proj, facts, hints, intents, sources_by_intent
 
 
-def _export_yaml(conn, project_id: str) -> str:
+def _build_export_dict(
+    conn,
+    project_id: str,
+    *,
+    fact_ids: set[str] | None = None,
+    intent_ids: set[str] | None = None,
+    include_base_knowledge: bool = False,
+) -> dict:
     proj, facts, hints, intents, sources_by_intent = _load_project_data(conn, project_id)
+    current_cv = current_codebase_version(get_origin_description(conn, project_id))
 
     origin_desc = ""
     goal_desc = ""
@@ -63,6 +75,11 @@ def _export_yaml(conn, project_id: str) -> str:
             origin_desc = f["description"]
         elif f["id"] == "goal":
             goal_desc = f["description"]
+
+    if fact_ids is not None:
+        facts = [f for f in facts if f["id"] in fact_ids]
+    if intent_ids is not None:
+        intents = [i for i in intents if i["id"] in intent_ids]
 
     data: dict = {
         "project": {
@@ -97,12 +114,17 @@ def _export_yaml(conn, project_id: str) -> str:
             fact_entry["code_version"] = f["code_version"]
         if f["verifies"]:
             fact_entry["verifies"] = f["verifies"]
+        if f["batch_id"]:
+            fact_entry["batch_id"] = f["batch_id"]
+        if f["evidence"]:
+            fact_entry["evidence"] = f["evidence"]
         eff_conf, stale = effective_confidence(
             conn, project_id,
             own_confidence=f["confidence"],
             own_code_version=f["code_version"],
             own_type=f["type"],
             fact_id=f["id"],
+            current_code_version=current_cv,
         )
         if eff_conf:
             fact_entry["effective_confidence"] = eff_conf
@@ -126,6 +148,33 @@ def _export_yaml(conn, project_id: str) -> str:
     if intent_list:
         data["intents"] = intent_list
 
+    if include_base_knowledge:
+        bk = load_base_knowledge(conn, project_id)
+        if bk["version"] > 0 or bk["entries"] or bk["routing_map"]:
+            data["base_knowledge"] = {
+                "version": bk["version"],
+                "entries": bk["entries"],
+                "routing_map": bk["routing_map"],
+            }
+
+    return data
+
+
+def _export_yaml(
+    conn,
+    project_id: str,
+    *,
+    fact_ids: set[str] | None = None,
+    intent_ids: set[str] | None = None,
+    include_base_knowledge: bool = False,
+) -> str:
+    data = _build_export_dict(
+        conn,
+        project_id,
+        fact_ids=fact_ids,
+        intent_ids=intent_ids,
+        include_base_knowledge=include_base_knowledge,
+    )
     return yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
@@ -191,6 +240,37 @@ def export_project(project_id: str, format: str = "yaml"):
         if format == "timeline":
             text = _export_timeline(conn, project_id)
         else:
-            text = _export_yaml(conn, project_id)
+            text = _export_yaml(conn, project_id, include_base_knowledge=True)
 
+        return Response(content=text, media_type="text/plain")
+
+
+@router.get("/projects/{project_id}/relevant_subgraph")
+def export_relevant_subgraph(project_id: str, format: str = "yaml", max_hops: int = 8):
+    if format not in ("yaml", "json"):
+        raise HTTPException(400, "Supported formats: yaml, json")
+    if max_hops < 1 or max_hops > 32:
+        raise HTTPException(400, "max_hops must be between 1 and 32")
+
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        fact_ids, intent_ids = relevant_subgraph(conn, project_id, max_hops=max_hops)
+        if format == "json":
+            data = _build_export_dict(
+                conn,
+                project_id,
+                fact_ids=fact_ids,
+                intent_ids=intent_ids,
+                include_base_knowledge=True,
+            )
+            data["fact_ids"] = sorted(fact_ids)
+            data["intent_ids"] = sorted(intent_ids)
+            return JSONResponse(content=data)
+        text = _export_yaml(
+            conn,
+            project_id,
+            fact_ids=fact_ids,
+            intent_ids=intent_ids,
+            include_base_knowledge=True,
+        )
         return Response(content=text, media_type="text/plain")

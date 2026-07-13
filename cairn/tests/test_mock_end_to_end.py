@@ -49,6 +49,38 @@ class InProcessClient:
         response.raise_for_status()
         return response.text
 
+    def export_relevant_subgraph(self, project_id: str, max_hops: int = 8) -> str:
+        response = self.http.get(
+            f"/projects/{project_id}/relevant_subgraph?format=yaml&max_hops={max_hops}"
+        )
+        response.raise_for_status()
+        return response.text
+
+    def get_base_knowledge(self, project_id: str) -> dict:
+        response = self.http.get(f"/projects/{project_id}/base_knowledge")
+        response.raise_for_status()
+        return response.json()
+
+    def put_base_knowledge(
+        self,
+        project_id: str,
+        *,
+        entries: list[dict],
+        routing_map: list[dict] | None = None,
+        expected_version: int | None = None,
+        actor: str = "worker",
+    ) -> ApiResult:
+        payload: dict[str, Any] = {
+            "entries": entries,
+            "routing_map": routing_map or [],
+            "actor": actor,
+        }
+        if expected_version is not None:
+            payload["expected_version"] = expected_version
+        response = self.http.put(f"/projects/{project_id}/base_knowledge", json=payload)
+        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+        return ApiResult(response.status_code, data, response.text)
+
     def heartbeat(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
         return self._post(f"/projects/{project_id}/intents/{intent_id}/heartbeat", {"worker": worker})
 
@@ -68,6 +100,22 @@ class InProcessClient:
         return self._post(
             f"/projects/{project_id}/intents/{intent_id}/conclude",
             {"worker": worker, "description": description},
+        )
+
+    def conclude_observations(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        observations: list[dict],
+        base_knowledge_patches: list[dict] | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {"worker": worker, "observations": observations}
+        if base_knowledge_patches:
+            payload["base_knowledge_patches"] = base_knowledge_patches
+        return self._post(
+            f"/projects/{project_id}/intents/{intent_id}/conclude",
+            payload,
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:

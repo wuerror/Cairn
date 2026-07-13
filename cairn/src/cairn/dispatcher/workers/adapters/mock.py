@@ -92,7 +92,7 @@ if phase=="reason":
 
 if phase=="bootstrap":
     if outcome=="complete":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap"},"complete":{"description":"mock bootstrap complete from fact"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap"},"complete":{"description":"mock bootstrap complete from fact"},"base_knowledge":{"entries":[{"id":"bk001","kind":"architecture","statement":"mock architecture summary","evidence":["mock/app.py:1"],"confidence":"assumed"}],"routing_map":[{"src":"mock/app.py:10","live":"GET /health","via":"direct","confidence":"assumed"}]}}}, ensure_ascii=False))
     elif outcome=="fact":
         print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact-only bootstrap result"}}}, ensure_ascii=False))
     elif outcome=="rejected":
@@ -103,7 +103,7 @@ if phase=="bootstrap":
 
 if phase=="bootstrap_conclude":
     if outcome=="fact":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap_conclude"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap_conclude"},"base_knowledge":{"entries":[{"id":"bk001","kind":"auth","statement":"mock auth model","evidence":["mock/auth.py:1"],"confidence":"assumed"}],"routing_map":[]}}}, ensure_ascii=False))
     elif outcome=="rejected":
         print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
     else:
@@ -129,7 +129,8 @@ class MockDriver(SeedSessionDriver):
     @staticmethod
     def _argv(worker: WorkerConfig, prompt: str) -> list[str]:
         behavior = resolve_mock_behavior(worker.name, worker.env)
-        return ["python3", "-c", _SCRIPT, json.dumps(behavior, ensure_ascii=False), prompt]
+        import sys
+        return [sys.executable, "-c", _SCRIPT, json.dumps(behavior, ensure_ascii=False), prompt]
 
     def build_healthcheck(self, worker: WorkerConfig) -> list[str]:
         return self._argv(worker, '{"phase":"healthcheck"}')

@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
     value INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, kind)
 );
+
+CREATE TABLE IF NOT EXISTS base_knowledge (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL DEFAULT 0,
+    data TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT
+);
 """
 
 
@@ -100,6 +107,18 @@ def configure(path: Path) -> None:
         conn.executescript(SCHEMA)
         _ensure_project_columns(conn)
         _ensure_fact_columns(conn)
+        _ensure_base_knowledge_table(conn)
+
+
+def _ensure_base_knowledge_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS base_knowledge (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL DEFAULT 0,
+            data TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT
+        )"""
+    )
 
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:

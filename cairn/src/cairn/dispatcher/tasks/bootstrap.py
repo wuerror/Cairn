@@ -195,6 +195,7 @@ def run_bootstrap_task(
                 source="bootstrap",
                 phase_ms=execute_ms,
                 total_ms=int((time.perf_counter() - task_started) * 1000),
+                base_knowledge=data.get("base_knowledge"),
             )
         if did_timeout(first):
             LOG.warning(
@@ -355,7 +356,7 @@ def _try_conclude_fallback(
                 worker.name,
                 preview(str(conclude_data.get("complete"))),
             )
-        kind, fact_description = validate_bootstrap_conclude_payload(payload)
+        kind, conclude_data = validate_bootstrap_conclude_payload(payload)
     except Exception as exc:
         LOG.warning(
             "bootstrap conclude parse failed project=%s intent=%s worker=%s error=%s conclude_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -380,15 +381,24 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "rejected"
-    return write_conclude_result(
+    assert conclude_data is not None
+    status = write_conclude_result(
         client,
         project.project.id,
         intent.id,
         worker.name,
-        fact_description,
+        conclude_data["fact_description"],
         source="bootstrap_conclude",
         phase_ms=conclude_ms,
     )
+    if status == "success" and conclude_data.get("base_knowledge"):
+        _write_base_knowledge(
+            client,
+            project.project.id,
+            worker.name,
+            conclude_data["base_knowledge"],
+        )
+    return status
 
 
 def _bootstrap_prompt_replacements(project: ProjectDetail) -> dict[str, str]:
@@ -409,6 +419,43 @@ def _bootstrap_prompt_replacements(project: ProjectDetail) -> dict[str, str]:
     }
 
 
+def _write_base_knowledge(
+    client: CairnClient,
+    project_id: str,
+    worker_name: str,
+    base_knowledge: dict,
+) -> None:
+    # Re-fetch version before write (design: version drift → re-pull before conclude)
+    try:
+        current = client.get_base_knowledge(project_id)
+        expected_version = int(current.get("version", 0) or 0)
+    except Exception:
+        expected_version = 0
+    response = client.put_base_knowledge(
+        project_id,
+        entries=base_knowledge.get("entries") or [],
+        routing_map=base_knowledge.get("routing_map") or [],
+        expected_version=expected_version,
+        actor=worker_name,
+    )
+    if not response.ok:
+        LOG.warning(
+            "bootstrap base_knowledge write failed project=%s worker=%s status=%s body=%s",
+            project_id,
+            worker_name,
+            response.status_code,
+            response.text,
+        )
+    else:
+        LOG.info(
+            "bootstrap base_knowledge written project=%s worker=%s entries=%s routes=%s",
+            project_id,
+            worker_name,
+            len(base_knowledge.get("entries") or []),
+            len(base_knowledge.get("routing_map") or []),
+        )
+
+
 def _write_bootstrap_complete_result(
     client: CairnClient,
     project_id: str,
@@ -420,6 +467,7 @@ def _write_bootstrap_complete_result(
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
+    base_knowledge: dict | None = None,
 ) -> str:
     conclude = write_conclude_result_with_fact_id(
         client,
@@ -433,6 +481,8 @@ def _write_bootstrap_complete_result(
     )
     if conclude.status != "success":
         return "failed"
+    if base_knowledge:
+        _write_base_knowledge(client, project_id, worker_name, base_knowledge)
     if conclude.fact_id is None:
         LOG.warning(
             "bootstrap complete deferred because conclude response omitted fact id project=%s intent=%s worker=%s source=%s",

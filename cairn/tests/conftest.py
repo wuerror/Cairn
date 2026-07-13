@@ -123,7 +123,14 @@ class FakeClient:
         self.concluded.append((project_id, intent_id, worker, description))
         return ApiResult(200, {"fact": {"id": "f002"}})
 
-    def conclude_observations(self, project_id: str, intent_id: str, worker: str, observations: list[dict]) -> ApiResult:
+    def conclude_observations(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        observations: list[dict],
+        base_knowledge_patches: list[dict] | None = None,
+    ) -> ApiResult:
         desc = observations[0]["description"] if observations else ""
         self.concluded.append((project_id, intent_id, worker, desc))
         return ApiResult(200, {"fact": {"id": "f002"}})

@@ -15,6 +15,11 @@ Normal return example (rich observation format):
 {"accepted": true, "data": {"observations": [{"type": "sink", "description": "yaml.load uses unsafe Loader at app/config_loader.py:19", "locations": ["app/config_loader.py:19"]}, {"type": "source", "description": "/api/import accepts unauthenticated multipart upload", "locations": ["app/api/import_bp.py:31"]}]}}
 ```
 
+When a confirmed observation conflicts with an existing `base_knowledge` entry, also emit a patch (do not invent new entry ids):
+```json
+{"accepted": true, "data": {"observations": [{"type": "constraint", "description": "import_bp skips @login_required", "locations": ["app/api/import_bp.py:31"]}], "base_knowledge_patches": [{"entry_id": "bk001", "statement": "Most routes use @login_required; import_bp is an exception", "confidence": "code-confirmed", "evidence": ["app/api/import_bp.py:31"]}]}}
+```
+
 You may also return a single observation:
 ```json
 {"accepted": true, "data": {"description": "..."}}
@@ -28,6 +33,7 @@ You may also return a single observation:
 - `description` should clearly state the key objective result. Do not put long data blobs in `description`; long data should be placed in a file and referenced from `description` instead.
 - `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
 - When useful for PoC verification planning, include an `oracle_draft` field with a suggestion for what success would look like (e.g., "OOB HTTP callback with unique token").
+- If the graph includes `base_knowledge` and your findings contradict an entry, emit `base_knowledge_patches` with the existing `entry_id`. Only fill `statement` / `evidence` / `confidence` (`assumed` or `code-confirmed`). Never fill `revised_by`, `version`, or claim `live-confirmed`.
 
 # Context
 ## Graph

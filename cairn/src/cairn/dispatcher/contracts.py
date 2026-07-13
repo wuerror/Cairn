@@ -41,7 +41,10 @@ def _looks_like_reason_data(payload: dict[str, Any]) -> bool:
 
 
 def _looks_like_bootstrap_execute_data(payload: dict[str, Any]) -> bool:
-    if not isinstance(payload, dict) or set(payload) != {"fact", "complete"}:
+    if not isinstance(payload, dict):
+        return False
+    keys = set(payload)
+    if keys not in ({"fact", "complete"}, {"fact", "complete", "base_knowledge"}):
         return False
     return _is_dict(payload.get("fact")) and _is_dict(payload.get("complete"))
 
@@ -50,9 +53,66 @@ def _looks_like_bootstrap_conclude_data(payload: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
     keys = set(payload)
-    if keys not in ({"fact"}, {"fact", "complete"}):
+    if keys not in ({"fact"}, {"fact", "complete"}, {"fact", "base_knowledge"}, {"fact", "complete", "base_knowledge"}):
         return False
     return _is_dict(payload.get("fact"))
+
+
+def _normalize_base_knowledge(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("base_knowledge must be an object")
+    entries = value.get("entries")
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        raise ValueError("base_knowledge.entries must be an array")
+    normalized_entries: list[dict[str, Any]] = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"base_knowledge.entries[{i}] must be an object")
+        entry_id = entry.get("id")
+        kind = entry.get("kind")
+        statement = entry.get("statement")
+        if not isinstance(entry_id, str) or not entry_id.strip():
+            raise ValueError(f"base_knowledge.entries[{i}].id is required")
+        if not isinstance(kind, str) or not kind.strip():
+            raise ValueError(f"base_knowledge.entries[{i}].kind is required")
+        if not isinstance(statement, str) or not statement.strip():
+            raise ValueError(f"base_knowledge.entries[{i}].statement is required")
+        item: dict[str, Any] = {
+            "id": entry_id.strip(),
+            "kind": kind.strip(),
+            "statement": statement.strip(),
+            "confidence": entry.get("confidence") or "assumed",
+            "evidence": entry.get("evidence") or [],
+            "revised_by": entry.get("revised_by"),
+        }
+        if not isinstance(item["evidence"], list):
+            raise ValueError(f"base_knowledge.entries[{i}].evidence must be an array")
+        normalized_entries.append(item)
+
+    routing_map = value.get("routing_map") or []
+    if not isinstance(routing_map, list):
+        raise ValueError("base_knowledge.routing_map must be an array")
+    normalized_routes: list[dict[str, Any]] = []
+    for i, route in enumerate(routing_map):
+        if not isinstance(route, dict):
+            raise ValueError(f"base_knowledge.routing_map[{i}] must be an object")
+        src = route.get("src")
+        live = route.get("live")
+        if not isinstance(src, str) or not src.strip():
+            raise ValueError(f"base_knowledge.routing_map[{i}].src is required")
+        if not isinstance(live, str) or not live.strip():
+            raise ValueError(f"base_knowledge.routing_map[{i}].live is required")
+        normalized_routes.append({
+            "src": src.strip(),
+            "live": live.strip(),
+            "via": route.get("via") or "direct",
+            "confidence": route.get("confidence") or "assumed",
+        })
+    return {"entries": normalized_entries, "routing_map": normalized_routes}
 
 
 def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
@@ -60,7 +120,45 @@ def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
 
 
 def _looks_like_rich_explore_data(payload: dict[str, Any]) -> bool:
-    return isinstance(payload, dict) and set(payload) == {"observations"}
+    if not isinstance(payload, dict):
+        return False
+    keys = set(payload)
+    return keys == {"observations"} or keys == {"observations", "base_knowledge_patches"}
+
+
+def _normalize_base_knowledge_patches(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("base_knowledge_patches must be an array")
+    result: list[dict[str, Any]] = []
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"base_knowledge_patches[{i}] must be an object")
+        entry_id = item.get("entry_id")
+        if not isinstance(entry_id, str) or not entry_id.strip():
+            raise ValueError(f"base_knowledge_patches[{i}].entry_id is required")
+        normalized: dict[str, Any] = {"entry_id": entry_id.strip()}
+        if "statement" in item and item["statement"] is not None:
+            statement = item["statement"]
+            if not isinstance(statement, str) or not statement.strip():
+                raise ValueError(f"base_knowledge_patches[{i}].statement must be a non-empty string")
+            normalized["statement"] = statement.strip()
+        if "evidence" in item and item["evidence"] is not None:
+            evidence = item["evidence"]
+            if not isinstance(evidence, list) or not all(isinstance(e, str) for e in evidence):
+                raise ValueError(f"base_knowledge_patches[{i}].evidence must be an array of strings")
+            normalized["evidence"] = evidence
+        if "confidence" in item and item["confidence"] is not None:
+            confidence = item["confidence"]
+            if confidence not in ("assumed", "code-confirmed"):
+                raise ValueError(
+                    f"base_knowledge_patches[{i}].confidence must be assumed or code-confirmed"
+                )
+            normalized["confidence"] = confidence
+        # Model must not fill revised_by / version / live-confirmed
+        result.append(normalized)
+    return result
 
 
 def validate_reason_payload(
@@ -105,7 +203,7 @@ def validate_reason_payload(
     return "noop", None
 
 
-def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, str] | None]:
+def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -123,7 +221,7 @@ def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, di
     if not isinstance(fact_description, str) or not fact_description.strip():
         raise ValueError("fact.description is required")
 
-    result = {"fact_description": fact_description.strip()}
+    result: dict[str, Any] = {"fact_description": fact_description.strip()}
     complete = data.get("complete")
     if complete is None:
         raise ValueError("complete is required")
@@ -133,10 +231,13 @@ def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, di
     if not isinstance(complete_description, str) or not complete_description.strip():
         raise ValueError("complete.description is required")
     result["complete_description"] = complete_description.strip()
+    base_knowledge = _normalize_base_knowledge(data.get("base_knowledge"))
+    if base_knowledge is not None:
+        result["base_knowledge"] = base_knowledge
     return "complete", result
 
 
-def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
+def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -146,7 +247,7 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
         data = payload
     if not isinstance(data, dict):
         raise ValueError("accepted must be true or false")
-    extra_keys = set(data) - {"fact", "complete"}
+    extra_keys = set(data) - {"fact", "complete", "base_knowledge"}
     if extra_keys:
         raise ValueError("unexpected keys in conclude payload")
     fact = data.get("fact")
@@ -155,10 +256,17 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
     fact_description = fact.get("description")
     if not isinstance(fact_description, str) or not fact_description.strip():
         raise ValueError("fact.description is required")
-    return "fact", fact_description.strip()
+    result: dict[str, Any] = {"fact_description": fact_description.strip()}
+    base_knowledge = _normalize_base_knowledge(data.get("base_knowledge"))
+    if base_knowledge is not None:
+        result["base_knowledge"] = base_knowledge
+    return "fact", result
 
 
-def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]] | None]:
+def validate_explore_payload(
+    payload: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    """Return (kind, emit) where emit is {observations, base_knowledge_patches}."""
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -168,6 +276,8 @@ def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, list[dict[st
         data = payload
     if not isinstance(data, dict):
         raise ValueError("accepted must be true or false")
+
+    patches = _normalize_base_knowledge_patches(data.get("base_knowledge_patches"))
 
     if "observations" in data:
         observations = data["observations"]
@@ -202,9 +312,12 @@ def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, list[dict[st
                     raise ValueError(f"observation[{i}].oracle_draft must be a non-empty string")
                 normalized["oracle_draft"] = oracle_draft.strip()
             result.append(normalized)
-        return "observations", result
+        return "observations", {"observations": result, "base_knowledge_patches": patches}
 
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description is required")
-    return "fact", [{"description": description.strip()}]
+    return "fact", {
+        "observations": [{"description": description.strip()}],
+        "base_knowledge_patches": patches,
+    }

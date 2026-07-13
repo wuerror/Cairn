@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import time
 
+import yaml
+
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.contracts import parse_json_output, validate_reason_payload
 from cairn.dispatcher.prompting import (
@@ -90,6 +92,18 @@ def run_reason_task(
                     preview(healthcheck.result.stderr),
                 )
                 return "unhealthy"
+        subgraph_fact_ids: set[str] | None = None
+        try:
+            subgraph_data = yaml.safe_load(export_yaml) or {}
+            if isinstance(subgraph_data, dict) and isinstance(subgraph_data.get("facts"), list):
+                subgraph_fact_ids = {
+                    f.get("id")
+                    for f in subgraph_data["facts"]
+                    if isinstance(f, dict) and isinstance(f.get("id"), str)
+                }
+        except Exception:
+            subgraph_fact_ids = None
+
         open_intents = [
             {
                 "id": intent.id,
@@ -99,16 +113,24 @@ def run_reason_task(
             }
             for intent in project.intents
             if intent.to is None
+            and (
+                subgraph_fact_ids is None
+                or any(fid in subgraph_fact_ids for fid in intent.from_)
+            )
         ]
-        allowed_fact_ids = [fact.id for fact in project.facts if fact.id != "goal"]
+        if subgraph_fact_ids is not None:
+            allowed_fact_ids = [fid for fid in subgraph_fact_ids if fid != "goal"]
+        else:
+            allowed_fact_ids = [fact.id for fact in project.facts if fact.id != "goal"]
         LOG.debug(
-            "reason context prepared project=%s worker=%s facts=%s allowed_fact_ids=%s hints=%s open_intents=%s",
+            "reason context prepared project=%s worker=%s facts=%s allowed_fact_ids=%s hints=%s open_intents=%s subgraph=%s",
             project.project.id,
             worker.name,
             len(project.facts),
             len(allowed_fact_ids),
             len(project.hints),
             len(open_intents),
+            subgraph_fact_ids is not None,
         )
         prompt = render_prompt(
             load_prompt(config.runtime.prompt_group, "reason.md"),

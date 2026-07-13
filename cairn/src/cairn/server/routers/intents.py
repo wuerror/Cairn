@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 import json
+import logging
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -24,11 +25,14 @@ from cairn.server.services import (
     next_fact_id,
     next_intent_id,
     parse_json_list,
+    patch_base_knowledge_entry,
     utcnow,
     validate_facts_exist,
     validate_intent_creator_worker,
     validate_goal_not_in_sources,
 )
+
+LOG = logging.getLogger(__name__)
 
 router = APIRouter(tags=["intents"])
 
@@ -207,6 +211,15 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             (main_fact.id, body.worker, now, now, intent_id, project_id),
         )
 
+        if body.base_knowledge_patches:
+            _apply_base_knowledge_patches(
+                conn,
+                project_id,
+                patches=body.base_knowledge_patches,
+                revised_by=main_fact.id,
+                actor=body.worker,
+            )
+
         updated = conn.execute(
             "SELECT * FROM intents WHERE id = ? AND project_id = ?",
             (intent_id, project_id),
@@ -217,6 +230,37 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             facts=created_facts,
             intent=intent_to_model(conn, updated, project_id),
         )
+
+
+def _apply_base_knowledge_patches(
+    conn,
+    project_id: str,
+    *,
+    patches,
+    revised_by: str,
+    actor: str,
+) -> None:
+    """Apply explore-emitted BK patches; skip bad entry_id; never roll back facts."""
+    for patch in patches:
+        try:
+            patch_base_knowledge_entry(
+                conn,
+                project_id,
+                patch.entry_id,
+                statement=patch.statement,
+                evidence=patch.evidence,
+                confidence=patch.confidence,
+                revised_by=revised_by,
+                actor=actor,
+            )
+        except Exception as exc:
+            LOG.warning(
+                "base_knowledge patch skipped project=%s entry=%s revised_by=%s error=%s",
+                project_id,
+                patch.entry_id,
+                revised_by,
+                exc,
+            )
 
 
 def _row_to_fact(

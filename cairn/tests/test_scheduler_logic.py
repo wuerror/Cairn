@@ -141,6 +141,7 @@ def test_new_fact_dispatches_reason_before_unclaimed_explore_intent() -> None:
         {
             "get_project": lambda _self, _project_id: project,
             "export_project": lambda _self, _project_id: "graph",
+            "export_relevant_subgraph": lambda _self, _project_id, max_hops=8: "graph",
         },
     )()
     dispatched: list[tuple[str, str]] = []
@@ -171,6 +172,7 @@ def test_initial_enabled_project_without_bootstrap_worker_dispatches_reason() ->
         {
             "get_project": lambda _self, _project_id: project,
             "export_project": lambda _self, _project_id: "graph",
+            "export_relevant_subgraph": lambda _self, _project_id, max_hops=8: "graph",
         },
     )()
     dispatched: list[tuple[str, str]] = []
@@ -195,6 +197,7 @@ def test_initial_disabled_project_skips_configured_bootstrap_worker() -> None:
         {
             "get_project": lambda _self, _project_id: project,
             "export_project": lambda _self, _project_id: "graph",
+            "export_relevant_subgraph": lambda _self, _project_id, max_hops=8: "graph",
         },
     )()
     dispatched: list[tuple[str, str]] = []
