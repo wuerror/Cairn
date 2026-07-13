@@ -60,7 +60,7 @@ def test_reason_writes_graph_snapshot_and_creates_intent(monkeypatch) -> None:
     )
 
     assert outcome == "success"
-    assert client.created_intents == [("proj_001", ["f001"], "next step", "test-worker")]
+    assert client.created_intents == [("proj_001", ["f001"], "next step", "test-worker", None)]
     assert client.released_reasons == [("proj_001", "test-worker")]
     assert lease.started and lease.stopped
     assert len(containers.writes) == 1
@@ -260,4 +260,4 @@ def test_reason_startup_only_mode_skips_task_healthcheck(monkeypatch) -> None:
     )
 
     assert outcome == "success"
-    assert client.created_intents == [("proj_001", ["f001"], "next", "test-worker")]
+    assert client.created_intents == [("proj_001", ["f001"], "next", "test-worker", None)]

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import requests
 
-from cairn.dispatcher.config import DispatchConfig, WorkerConfig
+from cairn.dispatcher.config import DispatchConfig, WorkerCapability, WorkerConfig
 from cairn.dispatcher.models import ReasonCheckpoint, RunningTask
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
@@ -18,6 +18,7 @@ from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.dispatcher.tasks.bootstrap import run_bootstrap_task
 from cairn.dispatcher.tasks.explore import run_explore_task
 from cairn.dispatcher.tasks.reason import run_reason_task
+from cairn.dispatcher.tasks.verify import run_verify_task
 from cairn.server.models import Intent, ProjectDetail, ProjectSummary
 
 LOG = logging.getLogger(__name__)
@@ -25,6 +26,13 @@ UNHEALTHY_RETRY_AFTER_SECONDS = 5
 REJECTED_RETRY_AFTER_SECONDS = 5
 BOOTSTRAP_INTENT_DESCRIPTION = "bootstrap"
 BOOTSTRAP_INTENT_CREATOR = "dispatcher.bootstrap"
+
+TASK_REQUIRED_CAPABILITIES: dict[str, list[WorkerCapability]] = {
+    "reason": ["static_fs"],
+    "explore": ["static_fs"],
+    "bootstrap": ["static_fs"],
+    "verify": ["live_http"],
+}
 
 
 @dataclass(slots=True)
@@ -34,6 +42,7 @@ class WorkerSelection:
     blocked_unhealthy: list[str]
     blocked_rejected: list[str]
     blocked_task_type: list[str]
+    blocked_capabilities: list[str]
 
 
 class DispatcherLoop:
@@ -212,6 +221,9 @@ class DispatcherLoop:
                 project.project.status,
             )
             return False
+        # kill-switch: cancel any running verify tasks for this project
+        self._apply_verify_kill_switch(project)
+
         if self._is_initial_project(project):
             if project.project.reason is not None:
                 return False
@@ -225,14 +237,25 @@ class DispatcherLoop:
                 export_yaml = self.client.export_relevant_subgraph(summary.id)
                 return self._dispatch_reason(project, export_yaml, reason_trigger)
         running_intent_ids = self._project_running_explore_intents(summary.id)
-        unclaimed_intents = [
-            intent
-            for intent in project.intents
-            if intent.to is None
-            and intent.worker is None
-            and intent.id not in running_intent_ids
-            and not self._is_bootstrap_intent(intent)
-        ]
+        kill_active = self._verify_kill_active(project.project.id)
+        unclaimed_intents = []
+        for intent in project.intents:
+            if intent.to is not None or intent.worker is not None:
+                continue
+            if intent.id in running_intent_ids:
+                continue
+            if self._is_bootstrap_intent(intent):
+                continue
+            if self._is_verify_intent(intent):
+                if kill_active:
+                    continue  # hard-block new verify claims under kill-switch
+                if self.config.tasks.verify.require_fire_approval and intent.fire_status not in (
+                    "approved",
+                    "fired",
+                ):
+                    # do not claim/release thrash — wait for UI approve
+                    continue
+            unclaimed_intents.append(intent)
         if running_intent_ids and not unclaimed_intents:
             self._log_changed(
                 f"{skip_scope}:explore_running",
@@ -244,6 +267,8 @@ class DispatcherLoop:
         if unclaimed_intents:
             newest = max(unclaimed_intents, key=lambda i: i.created_at)
             export_yaml = self.client.export_project(summary.id)
+            if self._is_verify_intent(newest):
+                return self._dispatch_verify(project, export_yaml, newest)
             return self._dispatch_explore(project, export_yaml, newest)
         if project.project.reason is not None:
             self._log_changed(
@@ -473,6 +498,136 @@ class DispatcherLoop:
         LOG.info("dispatched explore project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
         return True
 
+    def _dispatch_verify(self, project: ProjectDetail, export_yaml: str, intent: Intent) -> bool:
+        if self._verify_kill_active(project.project.id):
+            self._log_changed(
+                f"project:{project.project.id}:verify:kill",
+                logging.INFO,
+                "skip verify project=%s intent=%s because kill-switch is active",
+                project.project.id,
+                intent.id,
+            )
+            return False
+        if self.config.tasks.verify.require_fire_approval and intent.fire_status not in ("approved", "fired"):
+            self._log_changed(
+                f"project:{project.project.id}:verify:fire",
+                logging.DEBUG,
+                "skip verify project=%s intent=%s fire_status=%s (awaiting approval)",
+                project.project.id,
+                intent.id,
+                intent.fire_status,
+            )
+            return False
+        selection = self._select_worker(project.project.id, "verify")
+        worker = selection.worker
+        if worker is None:
+            self._log_changed(
+                f"project:{project.project.id}:worker:verify",
+                logging.INFO,
+                "no worker available for verify project=%s intent=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s blocked_capabilities=%s",
+                project.project.id,
+                intent.id,
+                selection.blocked_busy,
+                selection.blocked_unhealthy,
+                selection.blocked_rejected,
+                selection.blocked_capabilities,
+            )
+            return False
+        self._clear_log_state(f"project:{project.project.id}:worker:verify")
+        claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
+        if claim.status_code in (403, 409):
+            level = logging.INFO if claim.status_code == 403 else logging.WARNING
+            LOG.log(
+                level,
+                "verify claim failed project=%s intent=%s worker=%s status=%s",
+                project.project.id,
+                intent.id,
+                worker.name,
+                claim.status_code,
+            )
+            return False
+        if not claim.ok:
+            LOG.warning(
+                "verify claim failed project=%s intent=%s worker=%s status=%s",
+                project.project.id,
+                intent.id,
+                worker.name,
+                claim.status_code,
+            )
+            return False
+        try:
+            future = self.executor.submit(
+                run_verify_task,
+                self.config,
+                self.client,
+                self.container_manager,
+                project,
+                export_yaml,
+                intent,
+                worker,
+                cancellation := TaskCancellation(),
+            )
+        except Exception:
+            LOG.exception(
+                "failed to submit verify task project=%s intent=%s worker=%s",
+                project.project.id,
+                intent.id,
+                worker.name,
+            )
+            self._best_effort_release(project.project.id, intent.id, worker.name)
+            return False
+        self.futures[future] = RunningTask(
+            project.project.id, "verify", worker.name, cancellation, intent_id=intent.id
+        )
+        self.runtime_project_ids.add(project.project.id)
+        self._clear_project_log_state(project.project.id)
+        LOG.info(
+            "dispatched verify project=%s intent=%s worker=%s",
+            project.project.id,
+            intent.id,
+            worker.name,
+        )
+        return True
+
+    def _is_verify_intent(self, intent: Intent) -> bool:
+        if intent.task_kind == "verify":
+            return True
+        if intent.poc_brief is not None:
+            return True
+        desc = (intent.description or "").upper()
+        return desc.startswith("VERIFY")
+
+    def _verify_kill_active(self, project_id: str) -> bool:
+        try:
+            control = self.client.get_verify_control(project_id)
+        except Exception:
+            return False
+        return bool(control.get("kill_requested"))
+
+    def _apply_verify_kill_switch(self, project: ProjectDetail) -> None:
+        if not self._verify_kill_active(project.project.id):
+            return
+        for task in list(self.futures.values()):
+            if task.project_id == project.project.id and task.task_type == "verify":
+                if task.cancellation.cancel("kill-switch"):
+                    LOG.warning(
+                        "kill-switch cancelled verify task project=%s intent=%s worker=%s",
+                        task.project_id,
+                        task.intent_id,
+                        task.worker_name,
+                    )
+        # immediately destroy verify containers (do not wait for task finally)
+        try:
+            removed = self.container_manager.destroy_verify_containers(project.project.id)
+            if removed:
+                LOG.warning(
+                    "kill-switch destroyed verify containers project=%s count=%s",
+                    project.project.id,
+                    removed,
+                )
+        except Exception as exc:
+            LOG.warning("kill-switch container destroy failed project=%s error=%s", project.project.id, exc)
+
     def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
         now = time.time()
         candidates: list[WorkerConfig] = []
@@ -480,10 +635,15 @@ class DispatcherLoop:
         blocked_unhealthy: list[str] = []
         blocked_rejected: list[str] = []
         blocked_task_type: list[str] = []
+        blocked_capabilities: list[str] = []
+        required_caps = TASK_REQUIRED_CAPABILITIES.get(task_type, ["static_fs"])
         running_counts = self._worker_counts()
         for worker in self.config.workers:
             if task_type not in worker.task_types:
                 blocked_task_type.append(worker.name)
+                continue
+            if not worker.has_capabilities(required_caps):
+                blocked_capabilities.append(f"{worker.name}(need={required_caps},have={worker.capabilities})")
                 continue
             running = running_counts.get(worker.name, 0)
             if running >= worker.max_running:
@@ -500,13 +660,14 @@ class DispatcherLoop:
             candidates.append(worker)
         if not candidates:
             LOG.debug(
-                "worker selection project=%s task=%s no candidates blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s blocked_task_type=%s",
+                "worker selection project=%s task=%s no candidates blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s blocked_task_type=%s blocked_capabilities=%s",
                 project_id,
                 task_type,
                 blocked_busy,
                 blocked_unhealthy,
                 blocked_rejected,
                 blocked_task_type,
+                blocked_capabilities,
             )
             return WorkerSelection(
                 worker=None,
@@ -514,10 +675,11 @@ class DispatcherLoop:
                 blocked_unhealthy=blocked_unhealthy,
                 blocked_rejected=blocked_rejected,
                 blocked_task_type=blocked_task_type,
+                blocked_capabilities=blocked_capabilities,
             )
         ordered = choose_worker(candidates, running_counts)
         LOG.debug(
-            "worker selection project=%s task=%s candidates=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s blocked_task_type=%s chosen=%s",
+            "worker selection project=%s task=%s candidates=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s blocked_task_type=%s blocked_capabilities=%s chosen=%s",
             project_id,
             task_type,
             [f"{worker.name}({running_counts.get(worker.name, 0)}/{worker.max_running},p{worker.priority})" for worker in candidates],
@@ -525,6 +687,7 @@ class DispatcherLoop:
             blocked_unhealthy,
             blocked_rejected,
             blocked_task_type,
+            blocked_capabilities,
             ordered[0].name if ordered else None,
         )
         return WorkerSelection(
@@ -533,6 +696,7 @@ class DispatcherLoop:
             blocked_unhealthy=blocked_unhealthy,
             blocked_rejected=blocked_rejected,
             blocked_task_type=blocked_task_type,
+            blocked_capabilities=blocked_capabilities,
         )
 
     def _worker_counts(self) -> dict[str, int]:
@@ -563,7 +727,9 @@ class DispatcherLoop:
         return {
             task.intent_id
             for task in self.futures.values()
-            if task.project_id == project_id and task.task_type == "explore" and task.intent_id is not None
+            if task.project_id == project_id
+            and task.task_type in ("explore", "verify")
+            and task.intent_id is not None
         }
 
     def _running_project_count(self, summaries: list[ProjectSummary]) -> int:

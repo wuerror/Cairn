@@ -44,6 +44,8 @@ Normal return example:
 - Optionally include `base_knowledge` if you already confirmed architecture/auth/routing facts during the session.
 - Do not put long data blobs in `fact.description`. Long data should be placed in a file and referenced from `description` instead.
 
+- Codebase is mounted read-only at `{codebase_mount_path}` (host: `{codebase_host_path}`).
+
 # Context
 ## Origin
 ```
@@ -58,4 +60,9 @@ Normal return example:
 ## Hints
 ```
 {hints}
+```
+
+## Codebase mount
+```
+{codebase_mount_path}
 ```

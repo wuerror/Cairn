@@ -13,7 +13,9 @@ from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
     best_effort_release,
     cancel_reason,
+    codebase_prompt_replacements,
     did_timeout,
+    ensure_static_container,
     project_allows_conclude_fallback,
     preview,
     run_healthcheck,
@@ -44,7 +46,17 @@ def run_explore_task(
     lease = HeartbeatLease.for_intent(client, project.project.id, intent.id, worker.name, config.runtime.interval)
     lease.start()
     try:
-        container_name = container_manager.ensure_running(project.project.id)
+        container_name, mount_err = ensure_static_container(config, container_manager, project)
+        if mount_err or not container_name:
+            LOG.error(
+                "explore failed: codebase mount project=%s intent=%s worker=%s error=%s",
+                project.project.id,
+                intent.id,
+                worker.name,
+                mount_err or "container unavailable",
+            )
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "failed"
 
         if task_healthcheck_enabled(config):
             LOG.info(
@@ -107,6 +119,7 @@ def run_explore_task(
                 ),
                 "intent_id": intent.id,
                 "intent_description": intent.description,
+                **codebase_prompt_replacements(config, project),
             },
         )
 
@@ -299,7 +312,26 @@ def _try_conclude_fallback(
         best_effort_release(client, project_id, intent.id, worker.name)
         return "failed"
 
-    container_name = container_manager.ensure_running(project_id)
+    # project_id-only path: re-resolve from client when possible; else bare ensure
+    try:
+        detail = client.get_project(project_id)
+        container_name, mount_err = ensure_static_container(config, container_manager, detail)
+        if mount_err or not container_name:
+            LOG.error(
+                "explore conclude failed: codebase mount project=%s intent=%s error=%s",
+                project_id,
+                intent.id,
+                mount_err or "container unavailable",
+            )
+            best_effort_release(client, project_id, intent.id, worker.name)
+            return "failed"
+        mount_repl = codebase_prompt_replacements(config, detail)
+    except Exception:
+        container_name = container_manager.ensure_running(project_id, profile="static")
+        mount_repl = {
+            "codebase_mount_path": config.container.codebase_mount_path,
+            "codebase_host_path": "",
+        }
 
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "explore_conclude.md"),
@@ -312,6 +344,7 @@ def _try_conclude_fallback(
             ),
             "intent_id": intent.id,
             "intent_description": intent.description,
+            **mount_repl,
         },
     )
     conclude_argv = driver.build_conclude(worker, prompt, session)

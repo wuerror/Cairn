@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.protocol.client import CairnClient
@@ -11,11 +14,13 @@ from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.runtime.process import ProcessResult
+from cairn.server.models import ProjectDetail
 
 HEALTHCHECK_COMMUNICATE_GRACE_SECONDS = 10
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
 GRAPH_SNAPSHOT_ROOT = "/tmp/cairn-prompts"
+DEFAULT_CODEBASE_MOUNT_PATH = "/workspace/codebase"
 LOG = logging.getLogger(__name__)
 
 
@@ -36,6 +41,103 @@ def preview(text: str, limit: int = LOG_PREVIEW_LIMIT) -> str:
     if len(compact) <= limit:
         return compact
     return compact[:limit] + "..."
+
+
+def parse_origin_description(origin_description: str | None) -> dict | None:
+    if not origin_description:
+        return None
+    try:
+        parsed = json.loads(origin_description)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def project_origin_description(project: ProjectDetail) -> str | None:
+    for fact in project.facts:
+        if fact.id == "origin":
+            return fact.description
+    return None
+
+
+def origin_codebase_host_path(origin_description: str | None) -> str | None:
+    origin = parse_origin_description(origin_description)
+    if not origin:
+        return None
+    codebase = origin.get("codebase") or {}
+    if not isinstance(codebase, dict):
+        return None
+    path = codebase.get("path")
+    if isinstance(path, str) and path.strip():
+        return path.strip()
+    return None
+
+
+def resolve_codebase_host_path(
+    project: ProjectDetail,
+    *,
+    require_readable: bool = True,
+) -> tuple[str | None, str | None]:
+    """Return (host_path, error). error set when path is declared but unusable."""
+    host_path = origin_codebase_host_path(project_origin_description(project))
+    if not host_path:
+        return None, None
+    if not require_readable:
+        return host_path, None
+    try:
+        path = Path(host_path)
+        if not path.exists():
+            return None, f"codebase path does not exist: {host_path}"
+        if not os.access(path, os.R_OK):
+            return None, f"codebase path is not readable: {host_path}"
+    except OSError as exc:
+        return None, f"codebase path unusable ({host_path}): {exc}"
+    return str(path), None
+
+
+def codebase_mount_path(config: DispatchConfig) -> str:
+    return config.container.codebase_mount_path or DEFAULT_CODEBASE_MOUNT_PATH
+
+
+def ensure_static_container(
+    config: DispatchConfig,
+    container_manager: ContainerManager,
+    project: ProjectDetail,
+) -> tuple[str | None, str | None]:
+    """Start static profile with optional RO codebase bind. Returns (name, error)."""
+    host_path, err = resolve_codebase_host_path(project, require_readable=True)
+    if err:
+        LOG.error(
+            "static container codebase bind failed project=%s error=%s",
+            project.project.id,
+            err,
+        )
+        return None, err
+    name = container_manager.ensure_running(
+        project.project.id,
+        profile="static",
+        codebase_host_path=host_path,
+    )
+    if host_path:
+        LOG.info(
+            "static container ready project=%s container=%s codebase_host=%s mount=%s",
+            project.project.id,
+            name,
+            host_path,
+            codebase_mount_path(config),
+        )
+    return name, None
+
+
+def codebase_prompt_replacements(
+    config: DispatchConfig,
+    project: ProjectDetail,
+) -> dict[str, str]:
+    host_path, _ = resolve_codebase_host_path(project, require_readable=False)
+    return {
+        "codebase_mount_path": codebase_mount_path(config),
+        "codebase_host_path": host_path or "",
+    }
 
 
 def did_timeout(result: ProcessResult) -> bool:

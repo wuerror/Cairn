@@ -11,7 +11,7 @@ import docker
 from docker.errors import APIError, DockerException, NotFound
 from docker.models.containers import Container
 
-from cairn.dispatcher.config import ContainerConfig
+from cairn.dispatcher.config import ContainerConfig, ContainerProfileName, ResolvedContainerProfile
 from cairn.dispatcher.runtime.process import ManagedProcess
 
 LOG = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ LOG = logging.getLogger(__name__)
 
 class ContainerManager:
     _PREFIX = "cairn-dispatch-"
+    _VERIFY_PREFIX = "cairn-verify-"
     _STARTUP_PREFIX = "cairn-startup-healthcheck-"
 
     def __init__(self, config: ContainerConfig):
@@ -26,20 +27,68 @@ class ContainerManager:
         self._client = docker.from_env()
         self._ensure_running_locks: dict[str, threading.Lock] = {}
         self._ensure_running_locks_guard = threading.Lock()
+        self._verify_containers: dict[str, set[str]] = {}
+        self._verify_containers_lock = threading.Lock()
 
     def close(self) -> None:
         self._client.close()
 
-    def container_name(self, project_id: str) -> str:
+    def container_name(self, project_id: str, profile: ContainerProfileName = "static") -> str:
         sanitized = project_id.replace("/", "-")
+        if profile == "verify":
+            return f"{self._VERIFY_PREFIX}{sanitized}-{uuid.uuid4().hex[:8]}"
         return f"{self._PREFIX}{sanitized}"
 
-    def ensure_running(self, project_id: str) -> str:
-        name = self.container_name(project_id)
-        with self._ensure_running_lock(name):
-            return self._ensure_running_locked(project_id, name)
+    def static_container_name(self, project_id: str) -> str:
+        return self.container_name(project_id, "static")
 
-    def _ensure_running_locked(self, project_id: str, name: str) -> str:
+    def ensure_running(
+        self,
+        project_id: str,
+        profile: ContainerProfileName = "static",
+        *,
+        codebase_host_path: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
+        resolved = self._config.resolve_profile(
+            profile,
+            codebase_host_path=codebase_host_path,
+            extra_env=extra_env,
+        )
+        if profile == "verify":
+            # always create a fresh short-lived verify container
+            name = self.container_name(project_id, "verify")
+            created = self._create_container(project_id, name, resolved)
+            with self._verify_containers_lock:
+                self._verify_containers.setdefault(project_id, set()).add(created)
+            return created
+        name = self.container_name(project_id, "static")
+        with self._ensure_running_lock(name):
+            return self._ensure_running_locked(project_id, name, resolved)
+
+    def destroy_verify_containers(self, project_id: str) -> int:
+        """Kill-switch: immediately remove all tracked verify containers for project."""
+        with self._verify_containers_lock:
+            names = list(self._verify_containers.get(project_id, set()))
+            self._verify_containers[project_id] = set()
+        # also sweep by name prefix in case tracking missed
+        prefix = f"{self._VERIFY_PREFIX}{project_id.replace('/', '-')}"
+        for name in self.managed_container_names():
+            if name.startswith(prefix) and name not in names:
+                names.append(name)
+        removed = 0
+        for name in names:
+            try:
+                self.remove_container(name, force=True)
+                removed += 1
+            except Exception as exc:
+                LOG.warning("destroy verify container failed name=%s error=%s", name, exc)
+        return removed
+
+    def _ensure_running_locked(
+        self, project_id: str, name: str, profile: ResolvedContainerProfile | None = None
+    ) -> str:
+        resolved = profile or self._config.resolve_profile("static")
         state = self.inspect_state(name)
         if state == "running":
             LOG.debug("container already running project=%s container=%s", project_id, name)
@@ -48,15 +97,33 @@ class ContainerManager:
             LOG.info("starting existing container project=%s container=%s state=%s", project_id, name, state)
             self._start_existing(name)
             return name
-        LOG.info("creating container project=%s container=%s image=%s", project_id, name, self._config.image)
+        return self._create_container(project_id, name, resolved)
+
+    def _create_container(self, project_id: str, name: str, profile: ResolvedContainerProfile) -> str:
+        LOG.info(
+            "creating container project=%s container=%s image=%s profile=%s binds=%s env_keys=%s",
+            project_id,
+            name,
+            profile.image,
+            profile.name,
+            profile.binds,
+            sorted(profile.environment.keys()),
+        )
+        run_kwargs: dict = {
+            "detach": True,
+            "name": name,
+            "network_mode": profile.network_mode,
+            "cap_add": profile.cap_add or None,
+        }
+        if profile.environment:
+            run_kwargs["environment"] = profile.environment
+        if profile.binds:
+            run_kwargs["volumes"] = profile.binds
         try:
             self._client.containers.run(
-                self._config.image,
+                profile.image,
                 ["sleep", "infinity"],
-                detach=True,
-                name=name,
-                network_mode=self._config.network_mode,
-                cap_add=self._config.cap_add or None,
+                **run_kwargs,
             )
             LOG.info("created container project=%s container=%s", project_id, name)
             return name
@@ -83,15 +150,16 @@ class ContainerManager:
 
     def create_startup_container(self) -> str:
         name = f"{self._STARTUP_PREFIX}{uuid.uuid4().hex[:12]}"
-        LOG.debug("creating startup healthcheck container container=%s image=%s", name, self._config.image)
+        profile = self._config.resolve_profile("static")
+        LOG.debug("creating startup healthcheck container container=%s image=%s", name, profile.image)
         try:
             self._client.containers.run(
-                self._config.image,
+                profile.image,
                 ["sleep", "infinity"],
                 detach=True,
                 name=name,
-                network_mode=self._config.network_mode,
-                cap_add=self._config.cap_add or None,
+                network_mode=profile.network_mode,
+                cap_add=profile.cap_add or None,
             )
         except DockerException as exc:
             raise RuntimeError(f"failed to create startup container {name}: {exc}") from exc
@@ -109,7 +177,7 @@ class ContainerManager:
         return str(state) if state else None
 
     def cleanup_completed(self, project_id: str) -> bool:
-        name = self.container_name(project_id)
+        name = self.static_container_name(project_id)
         state = self.inspect_state(name)
         if state is None:
             return True
@@ -137,7 +205,7 @@ class ContainerManager:
         return True
 
     def cleanup_stopped(self, project_id: str) -> bool:
-        name = self.container_name(project_id)
+        name = self.static_container_name(project_id)
         state = self.inspect_state(name)
         if state != "running":
             return True
@@ -173,10 +241,14 @@ class ContainerManager:
         except DockerException as exc:
             LOG.warning("failed to list managed containers error=%s", exc)
             return []
-        return sorted(container.name for container in containers if container.name.startswith(self._PREFIX))
+        return sorted(
+            container.name
+            for container in containers
+            if container.name.startswith(self._PREFIX) or container.name.startswith(self._VERIFY_PREFIX)
+        )
 
     def needs_completed_cleanup(self, project_id: str) -> bool:
-        name = self.container_name(project_id)
+        name = self.static_container_name(project_id)
         state = self.inspect_state(name)
         if state is None:
             return False
@@ -188,7 +260,7 @@ class ContainerManager:
         return self.inspect_state(name) is not None
 
     def needs_stopped_cleanup(self, project_id: str) -> bool:
-        return self.inspect_state(self.container_name(project_id)) == "running"
+        return self.inspect_state(self.static_container_name(project_id)) == "running"
 
     def build_exec_process(
         self,
@@ -232,6 +304,11 @@ class ContainerManager:
             return
         except DockerException as exc:
             LOG.warning("failed to remove container=%s error=%s", name, exc)
+        finally:
+            with self._verify_containers_lock:
+                for project_id, names in list(self._verify_containers.items()):
+                    if name in names:
+                        names.discard(name)
 
     def _start_existing(self, name: str) -> None:
         LOG.debug("starting container=%s", name)

@@ -24,6 +24,13 @@ def make_config() -> DispatchConfig:
                 "bootstrap": {"timeout": 10, "conclude_timeout": 5},
                 "reason": {"timeout": 10, "max_intents": 3},
                 "explore": {"timeout": 10, "conclude_timeout": 5},
+                "verify": {
+                    "timeout": 30,
+                    "conclude_timeout": 10,
+                    "require_fire_approval": False,
+                    "force_harness": True,
+                    "max_rounds": 3,
+                },
             },
             "container": {
                 "image": "test-image",
@@ -34,7 +41,8 @@ def make_config() -> DispatchConfig:
                 {
                     "name": "test-worker",
                     "type": "mock",
-                    "task_types": ["bootstrap", "reason", "explore"],
+                    "task_types": ["bootstrap", "reason", "explore", "verify"],
+                    "capabilities": ["static_fs", "live_http"],
                     "max_running": 1,
                     "priority": 0,
                 }
@@ -99,12 +107,22 @@ class FakeLease:
 @dataclass
 class FakeContainerManager:
     writes: list[tuple[str, str, str]] = field(default_factory=list)
+    ensure_calls: list[dict] = field(default_factory=list)
 
-    def ensure_running(self, project_id: str) -> str:
-        return f"container-{project_id}"
+    def ensure_running(self, project_id: str, profile: str = "static", **kwargs) -> str:
+        self.ensure_calls.append({"project_id": project_id, "profile": profile, **kwargs})
+        if profile == "static":
+            return f"container-{project_id}"
+        return f"container-{project_id}-{profile}"
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
         self.writes.append((container_name, path, content))
+
+    def remove_container(self, name: str, *, force: bool = True) -> None:
+        return None
+
+    def destroy_verify_containers(self, project_id: str) -> int:
+        return 0
 
 
 @dataclass
@@ -112,7 +130,7 @@ class FakeClient:
     project: ProjectDetail
     concluded: list[tuple[str, str, str, str]] = field(default_factory=list)
     completed: list[tuple[str, list[str], str, str]] = field(default_factory=list)
-    created_intents: list[tuple[str, list[str], str, str]] = field(default_factory=list)
+    created_intents: list[tuple[str, list[str], str, str, str | None]] = field(default_factory=list)
     released: list[tuple[str, str, str]] = field(default_factory=list)
     released_reasons: list[tuple[str, str]] = field(default_factory=list)
 
@@ -139,8 +157,16 @@ class FakeClient:
         self.completed.append((project_id, from_ids, description, worker))
         return ApiResult(200, {})
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
-        self.created_intents.append((project_id, from_ids, description, creator))
+    def create_intent(
+        self,
+        project_id: str,
+        from_ids: list[str],
+        description: str,
+        creator: str,
+        *,
+        task_kind: str | None = None,
+    ) -> ApiResult:
+        self.created_intents.append((project_id, from_ids, description, creator, task_kind))
         return ApiResult(201, {})
 
     def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:

@@ -39,17 +39,37 @@ tasks:
     timeout: 300
     # Time budget for conclude fallback used to summarize confirmed findings from the same session.
     conclude_timeout: 90
+  verify:
+    # Verify is multi-round in-task; keep timeout much longer than explore.
+    timeout: 900
+    conclude_timeout: 180
+    # Demo: set false to auto-fire. Production: true and approve in UI.
+    require_fire_approval: false
+    # Dispatcher-owned harness only (model never opens sockets).
+    force_harness: true
+    max_rounds: 3
+    # Optional: one restricted local re-instantiation after no_signal.
+    allow_model_instantiate: true
+    # proxy_url: "http://127.0.0.1:8080"
 
 container:
-  # Base worker container. The dispatcher execs agent commands inside one container per project.
+  # Base worker container (static profile). The dispatcher execs agent commands inside one container per project.
   image: "ghcr.io/oritera/cairn-worker-container:latest"
   network_mode: "host"
   # "stop" keeps finished containers for inspection; "remove" is cleaner but loses post-run state.
   completed_action: "stop"
+  # Host codebase is bind-mounted RO at this path for static + verify profiles.
+  codebase_mount_path: "/workspace/codebase"
   # Add Linux capabilities only when a task truly needs them, such as packet crafting or network admin actions.
   # cap_add:
   #   - "NET_RAW"
   #   - "NET_ADMIN"
+  # Dual profiles (decision #8/#14). static inherits top-level defaults.
+  # verify needs network reachability to the lab target (host network is simplest for local demos).
+  verify:
+    image: "ghcr.io/oritera/cairn-worker-container:latest"
+    network_mode: "host"
+    cap_add: []
 
 
 workers:
@@ -57,7 +77,9 @@ workers:
   # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
   - name: "claudecode_deepseek-v4-pro"
     type: "claudecode"
-    task_types: [bootstrap, reason, explore]
+    # static audit + live verify on one worker (can split into two workers if preferred)
+    task_types: [bootstrap, reason, explore, verify]
+    capabilities: [static_fs, live_http]
     max_running: 2
     priority: 0
     env:
@@ -67,7 +89,8 @@ workers:
 
   - name: "codex_qwen3.6-plus"
     type: "codex"
-    task_types: [bootstrap,reason,explore]
+    task_types: [bootstrap, reason, explore, verify]
+    capabilities: [static_fs, live_http]
     max_running: 2
     priority: 0
     env:
@@ -77,7 +100,8 @@ workers:
 
   - name: "pi_qwen3.6-plus"
     type: "pi"
-    task_types: [bootstrap,reason,explore]
+    task_types: [bootstrap, reason, explore, verify]
+    capabilities: [static_fs, live_http]
     max_running: 2
     priority: 0
     env:
@@ -86,3 +110,15 @@ workers:
       PI_API_KEY: "sk-xxx"
       PI_PROVIDER_API: "openai-completions"
       PI_MODEL_CONTEXT_WINDOW: "262144"
+
+  # Optional dedicated verify worker (live_http only):
+  # - name: "verify_live_http"
+  #   type: "claudecode"
+  #   task_types: [verify]
+  #   capabilities: [live_http]
+  #   max_running: 1
+  #   priority: 1
+  #   env:
+  #     ANTHROPIC_MODEL: "deepseek-v4-pro"
+  #     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
+  #     ANTHROPIC_AUTH_TOKEN: "sk-xxx"

@@ -189,9 +189,20 @@ def validate_reason_payload(
     if intents is not None:
         if not isinstance(intents, list):
             raise ValueError("intents must be an array")
+        normalized_intents: list[dict[str, Any]] = []
         for i, intent in enumerate(intents):
             if not isinstance(intent, dict) or "from" not in intent or "description" not in intent:
                 raise ValueError(f"invalid intent at index {i}")
+            entry = dict(intent)
+            task_kind = entry.get("task_kind")
+            if task_kind is not None and task_kind not in ("explore", "verify"):
+                raise ValueError(f"invalid intent.task_kind at index {i}")
+            # Heuristic: VERIFY prefix → verify task_kind
+            desc = entry.get("description") or ""
+            if task_kind is None and isinstance(desc, str) and desc.upper().startswith("VERIFY"):
+                entry["task_kind"] = "verify"
+            normalized_intents.append(entry)
+        intents = normalized_intents
         if not intents and open_intents_empty:
             raise ValueError("intents must not be empty when open_intents is empty")
         intents = intents[:max_intents]
@@ -263,6 +274,74 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, d
     return "fact", result
 
 
+def validate_verify_payload(
+    payload: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    """Verify emit: harness_result or observations with verification facts."""
+    accepted, data = _unwrap_wrapped_payload(payload)
+    if accepted is False:
+        return "rejected", None
+    if accepted is None:
+        if isinstance(payload, dict) and (
+            "harness_result" in payload or "triggered" in payload or "observations" in payload
+        ):
+            data = payload
+        else:
+            raise ValueError("accepted must be true or false")
+    if not isinstance(data, dict):
+        raise ValueError("accepted must be true or false")
+
+    if "observations" in data:
+        observations = data["observations"]
+        if not isinstance(observations, list) or not observations:
+            raise ValueError("observations must be a non-empty array")
+        result: list[dict[str, Any]] = []
+        for i, obs in enumerate(observations):
+            if not isinstance(obs, dict):
+                raise ValueError(f"observation[{i}] must be an object")
+            description = obs.get("description")
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError(f"observation[{i}].description is required")
+            item: dict[str, Any] = {"description": description.strip()}
+            for key in ("type", "evidence", "verifies", "confidence", "oracle_draft"):
+                if key in obs and obs[key] is not None:
+                    item[key] = obs[key]
+            if "locations" in obs and obs["locations"] is not None:
+                item["locations"] = obs["locations"]
+            if "why_failed" in obs and obs["why_failed"] is not None:
+                item["why_failed"] = obs["why_failed"]
+            result.append(item)
+        return "observations", {"observations": result}
+
+    harness = data.get("harness_result")
+    if harness is None and "triggered" in data:
+        harness = {
+            "triggered": data["triggered"],
+            "evidence": data.get("evidence"),
+            "request": data.get("request"),
+            "response": data.get("response"),
+            "why_failed": data.get("why_failed"),
+            "observed_routing": data.get("observed_routing"),
+        }
+    if not isinstance(harness, dict) or "triggered" not in harness:
+        raise ValueError("harness_result with triggered is required")
+    if not isinstance(harness["triggered"], bool):
+        raise ValueError("harness_result.triggered must be boolean")
+    out: dict[str, Any] = {
+        "harness_result": {
+            "triggered": harness["triggered"],
+            "evidence": harness.get("evidence"),
+            "request": harness.get("request"),
+            "response": harness.get("response"),
+            "why_failed": harness.get("why_failed"),
+            "observed_routing": harness.get("observed_routing"),
+        }
+    }
+    if data.get("verifies"):
+        out["verifies"] = data["verifies"]
+    return "harness_result", out
+
+
 def validate_explore_payload(
     payload: dict[str, Any],
 ) -> tuple[str, dict[str, Any] | None]:
@@ -311,6 +390,11 @@ def validate_explore_payload(
                 if not isinstance(oracle_draft, str) or not oracle_draft.strip():
                     raise ValueError(f"observation[{i}].oracle_draft must be a non-empty string")
                 normalized["oracle_draft"] = oracle_draft.strip()
+            payload_draft = obs.get("payload_draft")
+            if payload_draft is not None:
+                if not isinstance(payload_draft, str) or not payload_draft.strip():
+                    raise ValueError(f"observation[{i}].payload_draft must be a non-empty string")
+                normalized["payload_draft"] = payload_draft.strip()
             result.append(normalized)
         return "observations", {"observations": result, "base_knowledge_patches": patches}
 

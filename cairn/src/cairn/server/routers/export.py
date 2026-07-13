@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, Response
 from datetime import datetime
+import json
 import yaml
 
 from cairn.server.db import get_conn
@@ -143,6 +144,16 @@ def _build_export_dict(
             "created_at": format_export_timestamp(i["created_at"]),
             "concluded_at": format_export_timestamp(i["concluded_at"]),
         }
+        keys = i.keys()
+        if "task_kind" in keys and i["task_kind"]:
+            entry["task_kind"] = i["task_kind"]
+        if "fire_status" in keys and i["fire_status"]:
+            entry["fire_status"] = i["fire_status"]
+        if "poc_brief" in keys and i["poc_brief"]:
+            try:
+                entry["poc_brief"] = json.loads(i["poc_brief"])
+            except (json.JSONDecodeError, TypeError):
+                entry["poc_brief"] = i["poc_brief"]
         intent_list.append(entry)
 
     if intent_list:

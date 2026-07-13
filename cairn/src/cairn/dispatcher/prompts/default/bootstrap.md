@@ -57,6 +57,8 @@ Only return the following after bootstrap mapping is done:
 - If the problem is not yet solved at the bootstrap level, keep working and do not stop on your own.
 - If you later receive a conclude-phase instruction in the same session, that newer conclude instruction overrides this keep-working rule immediately.
 
+- Codebase is mounted read-only at `{codebase_mount_path}`. Prefer evidence paths relative to that root (`file:line`). Host path (for operators): `{codebase_host_path}`.
+
 # Context
 ## Origin
 ```
@@ -71,4 +73,9 @@ Only return the following after bootstrap mapping is done:
 ## Hints
 ```
 {hints}
+```
+
+## Codebase mount
+```
+{codebase_mount_path}
 ```

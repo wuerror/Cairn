@@ -7,7 +7,21 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from cairn.server.models import ConfidenceLevel, Fact, FactType, Intent, Observation, ProjectMeta, ProjectReason
+from cairn.server.models import (
+    ConfidenceLevel,
+    Fact,
+    FactType,
+    Intent,
+    Observation,
+    PoCBrief,
+    PoCBriefEntry,
+    PoCBriefPayloadRecipe,
+    PoCBriefSuccessSignature,
+    ProjectMeta,
+    ProjectReason,
+    ProxyTrafficEntry,
+    VerifyControlState,
+)
 
 CONFIDENCE_LEVEL_ORDER: dict[ConfidenceLevel, int] = {
     "hypothesized": 0,
@@ -72,6 +86,42 @@ def current_codebase_version(origin_description: str | None) -> str | None:
     commit = (origin.get("codebase") or {}).get("commit")
     if commit:
         return str(commit)
+    return None
+
+
+def origin_allowlist(origin_description: str | None) -> list[str]:
+    origin = parse_origin_json(origin_description)
+    if not origin:
+        return []
+    raw = origin.get("allowlist") or []
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def origin_target_base_url(origin_description: str | None) -> str | None:
+    origin = parse_origin_json(origin_description)
+    if not origin:
+        return None
+    target = origin.get("target") or {}
+    if not isinstance(target, dict):
+        return None
+    base_url = target.get("base_url")
+    if isinstance(base_url, str) and base_url.strip():
+        return base_url.strip()
+    return None
+
+
+def origin_credentials_ref(origin_description: str | None) -> str | None:
+    origin = parse_origin_json(origin_description)
+    if not origin:
+        return None
+    target = origin.get("target") or {}
+    if not isinstance(target, dict):
+        return None
+    ref = target.get("credentials_ref")
+    if isinstance(ref, str) and ref.strip():
+        return ref.strip()
     return None
 
 
@@ -215,6 +265,9 @@ def fact_from_row(row: sqlite3.Row, conn: sqlite3.Connection | None = None, proj
             fact_id=row["id"],
             current_code_version=current_cv,
         )
+    keys = row.keys()
+    oracle_draft = row["oracle_draft"] if "oracle_draft" in keys else None
+    payload_draft = row["payload_draft"] if "payload_draft" in keys else None
     return Fact(
         id=row["id"],
         description=row["description"],
@@ -226,6 +279,8 @@ def fact_from_row(row: sqlite3.Row, conn: sqlite3.Connection | None = None, proj
         verifies=row["verifies"],
         intent_id=row["intent_id"],
         batch_id=row["batch_id"],
+        oracle_draft=oracle_draft,
+        payload_draft=payload_draft,
         effective_confidence=eff_conf,
         stale=stale,
     )
@@ -499,10 +554,12 @@ def import_codebase_facts(
             continue
         new_id = next_fact_id(conn, target_project_id)
         id_map[row["id"]] = new_id
+        keys = row.keys()
         conn.execute(
             """INSERT INTO facts (id, project_id, description, type, confidence,
-               locations, code_version, evidence, verifies, intent_id, batch_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               locations, code_version, evidence, verifies, intent_id, batch_id,
+               oracle_draft, payload_draft)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 new_id,
                 target_project_id,
@@ -515,6 +572,8 @@ def import_codebase_facts(
                 None,  # remapped below for verification
                 None,
                 row["batch_id"],
+                row["oracle_draft"] if "oracle_draft" in keys else None,
+                row["payload_draft"] if "payload_draft" in keys else None,
             ),
         )
         imported += 1
@@ -861,6 +920,15 @@ def intent_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str)
         "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
         (row["id"], project_id),
     ).fetchall()
+    keys = row.keys()
+    poc_brief = None
+    if "poc_brief" in keys and row["poc_brief"]:
+        try:
+            parsed = json.loads(row["poc_brief"])
+            if isinstance(parsed, dict):
+                poc_brief = parsed
+        except (json.JSONDecodeError, TypeError):
+            poc_brief = None
     return Intent(
         id=row["id"],
         **{"from": [s["fact_id"] for s in sources]},
@@ -871,7 +939,310 @@ def intent_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str)
         last_heartbeat_at=row["last_heartbeat_at"],
         created_at=row["created_at"],
         concluded_at=row["concluded_at"],
+        task_kind=row["task_kind"] if "task_kind" in keys else None,
+        poc_brief=poc_brief,
+        fire_status=row["fire_status"] if "fire_status" in keys else None,
     )
+
+
+def assemble_poc_brief(
+    conn: sqlite3.Connection,
+    project_id: str,
+    chain_fact_ids: list[str],
+    description: str = "",
+) -> PoCBrief:
+    """Assemble PoC Brief from existing facts + base_knowledge routing_map (decision #13)."""
+    facts_by_id: dict[str, sqlite3.Row] = {}
+    for fid in chain_fact_ids:
+        row = conn.execute(
+            "SELECT * FROM facts WHERE project_id = ? AND id = ?",
+            (project_id, fid),
+        ).fetchone()
+        if row is not None:
+            facts_by_id[fid] = row
+
+    if len(facts_by_id) != len(chain_fact_ids):
+        missing = [fid for fid in chain_fact_ids if fid not in facts_by_id]
+        raise HTTPException(400, f"verify chain facts not found: {', '.join(missing)}")
+
+    # connectivity: chain members must share Intent provenance or same batch (not free-floating)
+    _validate_chain_connectivity(conn, project_id, chain_fact_ids, facts_by_id)
+
+    bk = load_base_knowledge(conn, project_id)
+    routing_map = bk.get("routing_map") or []
+
+    # endpoint: first routing_map match against chain locations, else origin target
+    endpoint = ""
+    all_locations: list[str] = []
+    dataflow_parts: list[str] = []
+    constraints: list[str] = []
+    oracle_draft = ""
+    payload_draft = ""
+    gadget = None
+    payload_shape_parts: list[str] = []
+    for fid in chain_fact_ids:
+        row = facts_by_id[fid]
+        locs = parse_json_list(row["locations"]) or []
+        all_locations.extend(locs)
+        ftype = row["type"] or ""
+        dataflow_parts.append(f"{fid}({ftype}): {row['description']}" + (f" @ {','.join(locs)}" if locs else ""))
+        if ftype == "constraint":
+            constraints.append(fid)
+        keys = row.keys()
+        od = row["oracle_draft"] if "oracle_draft" in keys else None
+        if od and not oracle_draft:
+            oracle_draft = od
+        # prefer latest non-empty payload_draft along the chain (overwrite as we walk)
+        pd = row["payload_draft"] if "payload_draft" in keys else None
+        if isinstance(pd, str) and pd.strip():
+            payload_draft = pd.strip()
+        if ftype == "sink" and not gadget:
+            gadget = row["description"]
+        if ftype in ("sink", "dataflow") and row["description"]:
+            payload_shape_parts.append(row["description"])
+
+    for route in routing_map:
+        src = route.get("src") or ""
+        live = route.get("live") or ""
+        if any(src and src in loc for loc in all_locations) and live:
+            endpoint = live
+            break
+    base_url = origin_target_base_url(get_origin_description(conn, project_id))
+    if not endpoint:
+        # prefer structured live path; fall back to base_url (not "UNKNOWN" string that breaks harness)
+        if base_url:
+            endpoint = base_url.rstrip("/") + "/"
+        elif all_locations:
+            endpoint = all_locations[0]
+        else:
+            raise HTTPException(
+                400,
+                "cannot assemble PoC Brief: no routing_map match and origin.target.base_url missing",
+            )
+
+    success_kind = "response_match"
+    success_check = oracle_draft or "CAIRN_POC_OK"
+    if oracle_draft:
+        lower = oracle_draft.lower()
+        if "oob" in lower or "callback" in lower or "dns" in lower:
+            success_kind = "oob_callback"
+        elif "timing" in lower or "sleep" in lower:
+            success_kind = "timing"
+        elif "file" in lower or "side" in lower:
+            success_kind = "side_effect"
+
+    # P3: payload_recipe.shape prefers chain payload_draft over description prose
+    if payload_draft:
+        shape = payload_draft
+    elif description.strip():
+        shape = description.strip()
+    elif payload_shape_parts:
+        shape = " | ".join(payload_shape_parts)
+    else:
+        shape = "exploit payload per chain"
+
+    return PoCBrief(
+        chain=list(chain_fact_ids),
+        entry=PoCBriefEntry(endpoint=endpoint, precondition="none"),
+        dataflow=" → ".join(dataflow_parts) if dataflow_parts else description,
+        payload_recipe=PoCBriefPayloadRecipe(gadget=gadget, shape=shape),
+        success_signature=PoCBriefSuccessSignature(kind=success_kind, check=success_check),
+        constraints_to_bypass=constraints,
+    )
+
+
+def _validate_chain_connectivity(
+    conn: sqlite3.Connection,
+    project_id: str,
+    chain_fact_ids: list[str],
+    facts_by_id: dict[str, sqlite3.Row],
+) -> None:
+    """Ensure verify chain is not an arbitrary bag of fact ids.
+
+    Accept if:
+    - any pair shares batch_id, or
+    - any intent edge connects two chain members (from→to), or
+    - chain length == 1
+    """
+    if len(chain_fact_ids) <= 1:
+        return
+    chain_set = set(chain_fact_ids)
+    # same batch
+    batches = {
+        facts_by_id[fid]["batch_id"]
+        for fid in chain_fact_ids
+        if facts_by_id[fid]["batch_id"]
+    }
+    if batches:
+        for batch_id in batches:
+            members = [
+                fid for fid in chain_fact_ids if facts_by_id[fid]["batch_id"] == batch_id
+            ]
+            if len(members) >= 2:
+                return
+    # intent provenance links
+    intents = conn.execute(
+        "SELECT id, to_fact_id FROM intents WHERE project_id = ? AND to_fact_id IS NOT NULL",
+        (project_id,),
+    ).fetchall()
+    for intent in intents:
+        to_id = intent["to_fact_id"]
+        if to_id not in chain_set:
+            continue
+        sources = conn.execute(
+            "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ?",
+            (intent["id"], project_id),
+        ).fetchall()
+        if any(s["fact_id"] in chain_set for s in sources):
+            return
+    # also accept if all typed as source/dataflow/sink/constraint (typed attack chain)
+    types = {facts_by_id[fid]["type"] for fid in chain_fact_ids}
+    if types & {"source", "sink", "dataflow"} and types <= {
+        "source",
+        "sink",
+        "dataflow",
+        "constraint",
+        "gadget",
+        "reachability",
+        None,
+    }:
+        return
+    raise HTTPException(
+        400,
+        "verify chain is not connected via Intent provenance or shared batch_id",
+    )
+
+
+def get_verify_control(conn: sqlite3.Connection, project_id: str) -> VerifyControlState:
+    row = conn.execute(
+        "SELECT * FROM verify_controls WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        return VerifyControlState(project_id=project_id)
+    return VerifyControlState(
+        project_id=project_id,
+        kill_requested=bool(row["kill_requested"]),
+        kill_requested_at=row["kill_requested_at"],
+        kill_actor=row["kill_actor"],
+        kill_reason=row["kill_reason"],
+    )
+
+
+def request_verify_kill(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    actor: str,
+    reason: str,
+) -> VerifyControlState:
+    now = utcnow()
+    conn.execute(
+        """INSERT INTO verify_controls (project_id, kill_requested, kill_requested_at, kill_actor, kill_reason)
+           VALUES (?, 1, ?, ?, ?)
+           ON CONFLICT(project_id) DO UPDATE SET
+             kill_requested = 1,
+             kill_requested_at = excluded.kill_requested_at,
+             kill_actor = excluded.kill_actor,
+             kill_reason = excluded.kill_reason""",
+        (project_id, now, actor, reason),
+    )
+    return get_verify_control(conn, project_id)
+
+
+def clear_verify_kill(conn: sqlite3.Connection, project_id: str) -> VerifyControlState:
+    conn.execute(
+        """INSERT INTO verify_controls (project_id, kill_requested, kill_requested_at, kill_actor, kill_reason)
+           VALUES (?, 0, NULL, NULL, NULL)
+           ON CONFLICT(project_id) DO UPDATE SET
+             kill_requested = 0,
+             kill_requested_at = NULL,
+             kill_actor = NULL,
+             kill_reason = NULL""",
+        (project_id,),
+    )
+    return get_verify_control(conn, project_id)
+
+
+def set_intent_fire_status(
+    conn: sqlite3.Connection,
+    project_id: str,
+    intent_id: str,
+    status: str,
+) -> None:
+    conn.execute(
+        "UPDATE intents SET fire_status = ? WHERE id = ? AND project_id = ?",
+        (status, intent_id, project_id),
+    )
+
+
+def next_proxy_traffic_id(conn: sqlite3.Connection, project_id: str) -> str:
+    row = conn.execute(
+        "SELECT value FROM scoped_counters WHERE project_id = ? AND kind = 'proxy'",
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO scoped_counters (project_id, kind, value) VALUES (?, 'proxy', 1)",
+            (project_id,),
+        )
+        return "pt001"
+    value = int(row["value"]) + 1
+    conn.execute(
+        "UPDATE scoped_counters SET value = ? WHERE project_id = ? AND kind = 'proxy'",
+        (value, project_id),
+    )
+    return f"pt{value:03d}"
+
+
+def record_proxy_traffic(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    intent_id: str | None,
+    request: str,
+    response: str | None = None,
+    baseline: str | None = None,
+    status: str = "recorded",
+) -> ProxyTrafficEntry:
+    tid = next_proxy_traffic_id(conn, project_id)
+    now = utcnow()
+    conn.execute(
+        """INSERT INTO proxy_traffic
+           (id, project_id, intent_id, request, response, baseline, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (tid, project_id, intent_id, request, response, baseline, status, now),
+    )
+    return ProxyTrafficEntry(
+        id=tid,
+        project_id=project_id,
+        intent_id=intent_id,
+        request=request,
+        response=response,
+        baseline=baseline,
+        created_at=now,
+        status=status,  # type: ignore[arg-type]
+    )
+
+
+def list_proxy_traffic(conn: sqlite3.Connection, project_id: str) -> list[ProxyTrafficEntry]:
+    rows = conn.execute(
+        "SELECT * FROM proxy_traffic WHERE project_id = ? ORDER BY created_at DESC",
+        (project_id,),
+    ).fetchall()
+    return [
+        ProxyTrafficEntry(
+            id=r["id"],
+            project_id=project_id,
+            intent_id=r["intent_id"],
+            request=r["request"],
+            response=r["response"],
+            baseline=r["baseline"],
+            created_at=r["created_at"],
+            status=r["status"],
+        )
+        for r in rows
+    ]
 
 
 def build_intents(conn: sqlite3.Connection, project_id: str) -> list[Intent]:

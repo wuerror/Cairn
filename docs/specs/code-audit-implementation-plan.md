@@ -11,19 +11,20 @@
 - **不重写引擎。** lease / heartbeat / conclude 双阶段 / OODA 循环全部复用。改动是"扩数据模型 + 窄腰 emit + 新增 verify 相 + 新增基座层"。
 - **窄腰红线（决策 #5）。** 模型只吐扁平 `emit schema`；`id` / `code_version` / `intent_id` / `batch_id` / `confidence` 门控全在 server。任何"让模型填富 schema"的实现都要打回。
 - **append-only 红线（决策 #6）。** 没有任何 fact 被就地改写。confidence 升级 = 追加 `type: verification` fact；有效 confidence 是 server 折叠视图。
-- **分期交付。** P0 不需要测试环境即可跑通（富 fact + 窄腰 + 1→N conclude + 折叠 + origin 解析）；P1 加持久化与真实子图检索；P2 才引入"对实况环境发包"的验证路径与合规围栏。
-- **前端同期适配（本版新增）。** 前端是一个**单文件静态 SPA**（`server/static/index.html`，Alpine.js + Cytoscape + Tailwind，无构建步骤，server 直接托管）。富 fact 的 `type`/`confidence`/`locations`/`verifies` 若不改前端就在 UI 上隐形，且决策 #7 的附属 fact 会变成图上孤点。每个后端阶段配一条前端泳道（`P0.8`/`P1.5`/`P2.7`）。**合规人工闸门是 P2 的独立大界面，工作量不亚于部分后端。**
+- **分期交付。** P0 不需要测试环境即可跑通（富 fact + 窄腰 + 1→N conclude + 折叠 + origin 解析）；P1 加持久化与真实子图检索；P2 引入 verify 相与发包路径（含合规骨架）；**P3 以「能实际跑通」为唯一优先级**——代码挂进 explore、payload 能实例化、配置/demo 可一键演示。细扣合规（mitm/netns）后置，不阻塞实测。
+- **前端同期适配（本版新增）。** 前端是一个**单文件静态 SPA**（`server/static/index.html`，Alpine.js + Cytoscape + Tailwind，无构建步骤，server 直接托管）。富 fact 的 `type`/`confidence`/`locations`/`verifies` 若不改前端就在 UI 上隐形，且决策 #7 的附属 fact 会变成图上孤点。每个后端阶段配一条前端泳道（`P0.8`/`P1.5`/`P2.7`/`P3.1`）。
 
-### 就绪度对照（同事第三轮判断）
+### 就绪度对照
 
 | 层级 | 状态 | 落在阶段 |
 |---|---|---|
 | 问题形状 / 与 Cairn 关系 / append-only confidence / 1→N conclude / verify 相 / origin JSON | 已定 | — |
-| 富 Fact + 窄腰 emit + 折叠视图 + origin 解析 | 可开工 | **P0** |
-| 跨 run 持久化 + `relevant_subgraph` 真实实现 + 防腐 | 结构边已定(#12) | **P1** |
-| 真实验证：verify 相 + capability + 双容器 + harness + Brief 组装 + 合规闸门 | 三缝已补(#12/#13/#14) | **P2** |
-| Codebase / Goal-Run 拆表、向量检索、`preconditions`/`chain` 自动修复、`gadget`/`reachability` 类型 | 可后置 | **Later** |
-| 前端适配（富 fact 可视化 + 图外第二存储面板 + 合规人工闸门） | 原计划遗漏，本版补 | **P0补齐 / P1 / P2** |
+| 富 Fact + 窄腰 emit + 折叠视图 + origin 解析 | 已落地 | **P0** |
+| 跨 run 持久化 + `relevant_subgraph` 真实实现 + 防腐 | 已落地 | **P1** |
+| 真实验证：verify 相 + capability + 双容器 + harness + Brief 组装 + 合规骨架 | 骨架/围栏已落地 | **P2** |
+| **端到端可跑：代码挂载 + payload 实例化 + 示例配置 + demo 靶标** | **已落地** | **P3** |
+| mitm 透明代理 / 容器 netns 硬隔离 / Codebase 拆表 / 向量检索 | 可后置 | **Later** |
+| 前端适配（富 fact 可视化 + 基座面板 + 合规面板 + 建项结构化） | 已落地（含结构化建项） | **P0–P3** |
 
 ---
 
@@ -136,53 +137,150 @@
 
 **目标：对显式授权的测试环境发真实 payload，把 `poc-confirmed` 顶起来。合规围栏是硬门槛。**
 
+> 就绪度档位：`骨架` = API/UI 占位；`强制围栏` = 调度/harness 硬路径；`e2e` = 真 HTTP 靶标自动化。
+
 ### P2.1 verify 任务类型（决策 #10）
-- [ ] `config.py`：`TaskType` 加 `verify`；`TasksConfig` 加 `verify: VerifyTaskConfig(timeout, ...)`，`tasks.verify.timeout` **明显长于 explore**（决策 #11）。
-- [ ] `config.py:WorkerConfig`：新增 `capabilities: list[Literal["static_fs","live_http","browser"]]`。
-- [ ] `loop.py:_select_worker` / `worker_select.py`：路由时校验 `verify` 任务所需 capability ⊆ worker.capabilities（现只看 task_types + priority）。
-- [ ] `MOCK_ALLOWED_OUTCOMES` 加 `verify` 通道（triggered/refuted/...）。
+- [x] `config.py`：`TaskType` 加 `verify`；`TasksConfig` 加 `verify: VerifyTaskConfig`（timeout>>explore、`force_harness`/`max_rounds`/`proxy_url`）。
+- [x] `config.py:WorkerConfig`：新增 `capabilities: list[Literal["static_fs","live_http","browser"]]`。
+- [x] `loop.py:_select_worker`：capability 子集校验 + fire 未批准不 claim + kill 硬拦新 verify。
+- [x] `MOCK_ALLOWED_OUTCOMES` 加 `verify` 通道（triggered/refuted/...）。
 
 ### P2.2 Reason → verify 派发 + Brief 组装（决策 #13）
-- [ ] `prompts/default/reason.md`：新增"链已齐→派 verify"分支，只吐 `{from: chain_fact_ids, description}` 粗 Intent（**不手填 Brief**）。
-- [ ] `server`/`dispatcher`：校验 chain 存在性/连通性后，用**已落 fact + 模板**组装 `poc_brief`（`entry.endpoint`←`routing_map`；`dataflow`←chain 各 fact `locations`；`oracle`←explore 的 `oracle_draft`，缺则模板）。Brief 作为 verify Intent 的结构化 payload。
+- [x] `prompts/default/reason.md`：链齐→`task_kind:verify` 粗 Intent（不手填 Brief）。
+- [x] server `assemble_poc_brief`：chain 存在性 + **连通性**（batch / Intent provenance / 类型链）；routing_map→endpoint；缺 base_url 则 400（不再写 `UNKNOWN`）；oracle_draft→success_signature。
 
 ### P2.3 verify 任务运行时（决策 #11）
-- [ ] 新增 `dispatcher/tasks/verify.py`：读 chain 代码 + Brief → 写 Python 脚本跑 harness → **任务内多轮迭代**（试一发→看 `why_failed`→调 payload），中间过程进 `evidence`/日志**不进 fact**；**末轮**结构化 conclude。
-- [ ] 回写（append-only）：成功→`poc-confirmed` verification fact（`verifies`→末端 sink）+ PoC evidence；失败→`refuted` verification fact + 带 `why_failed` 的 `constraint` fact（可空 `locations`）；观察到的真实路由→回补 `routing_map`。
+- [x] **强制路径**：`execute_allowed_request` 由 dispatcher 开火，模型不碰 socket；任务内 `max_rounds` 迭代只改 payload。
+- [x] 回写 append-only：`poc-confirmed` / `refuted`+`constraint`；`observed_routing`→`routing_map` live-confirmed 回补。
 
 ### P2.4 双容器拓扑（决策 #8/#14）
-- [ ] `config.py:ContainerConfig`：从单 profile 扩为**按 task 能力选 profile**——`static`（只读 FS、无网络）与 `verify`（网络 + 凭证 + 代理 + 可选浏览器）。
-- [ ] `runtime/containers.py:ContainerManager`：支持一 project **并存** static + verify 容器；codebase volume **只读**挂两边；测试环境凭证/出站网络**只注入 verify profile**；verify 容器**每个 verify 任务结束即 remove**（static 沿用 `completed_action`）。
-- [ ] `loop.py`：dispatch verify 时选 verify profile 容器；生命周期与清理接入现有 `_queue_container_cleanups`。
+- [x] `ContainerConfig` static/verify profile；verify 可注入 env；codebase **:ro** bind；凭证 env **仅 verify**。
+- [x] verify 容器短生命周期 + kill 时 `destroy_verify_containers` 立即拆除。
+- [ ] **仍弱**：无透明网络命名空间/出站 iptables；隔离依赖「开火只走 dispatcher harness」而非容器 netns 硬拦任意进程出站。
 
 ### P2.5 harness 与合规围栏（合规章节 1–4，决策 #9）
-- [ ] verify harness：固化基建（强制走代理、伪造 header、session/auth 装配、base URL），只暴露"payload 逻辑"槽；消费 `success_signature` 返回结构化 `harness_result`。
-- [ ] **allowlist 硬约束**：出站目标 + 带外回连地址只允许 `origin.allowlist`；超范围由 harness 层直接拒绝（不靠模型自觉）。
-- [ ] **代理 = 强制审计轨 + 人工闸门**：所有攻击流量过代理留档；v1 人工在代理面板点确认（复用 `Hint`）才发包（体验/安全权衡可配置）。
-- [ ] **凭证 + kill-switch**：`credentials_ref` 走 secret 存储、只进 verify profile；提供"立即中止所有在跑 verify run"的开关（接 `runtime/cancellation.py`）。
-- [ ] **围栏边界即职责边界**：强模型只产出 Brief，permissive 模型只实例化+开火、不越 Brief 自主决策。
+- [x] **强制围栏**：`execute_allowed_request` allowlist 空=fail-closed；越界不 open socket；开火前/后 `proxy_traffic` 记账。
+- [x] fire 审批：未 approve 不 claim；kill-switch：cancel + 毁容器 + 拒新 claim。
+- [x] `credentials_ref`→`secret:`/`env:` 解析注入 verify env（非明文落图）。
+- [ ] **仍弱**：无独立 mitm 代理进程；`proxy_url` 可选注入 urllib ProxyHandler，不是透明审计网关。
 
 ### P2.6 测试
-- [ ] 起一个**本地一次性靶标**（如刻意可 RCE 的 Flask demo）跑 Worked Example 那条链，端到端到 `poc-confirmed`；
-- [ ] allowlist 拒绝越界目标；kill-switch 能中止；失败路径产出 refuted+constraint 并反向制导。
+- [x] 本地 HTTP 靶标 e2e：`test_p2_verify_forced.py` 真 POST→`poc-confirmed` + 越界无 socket + credentials 解析。
+- [x] allowlist / kill API / refuted+constraint 单测保留。
 
-### P2.7 前端（`server/static/index.html`）—— 合规面板是重头
-- [ ] **`verifies` 第二类边渲染。** `buildElements` 今天只有 Intent 边；verification fact → 被验证节点要画成**区别于 Intent 边的第二类边**（不同颜色/线型），并把 verification 折叠展示在被验证节点上（呼应决策 #6/#12 的"两类边"）。
-- [ ] **PoC Brief 查看器。** verify Intent 上挂的结构化 Brief（chain / entry / dataflow / payload_recipe / success_signature）可查看。
-- [ ] **人工闸门面板（合规硬需求，新的大界面）。** 设计文档 §合规 point 2 的"开火前人工确认"落在这里：审攻击流量（代理留档的 request/response，基线 vs payload diff）、approve/deny 开火（复用 `Hint` 写确认）、**kill-switch 按钮**（接 `runtime/cancellation.py`）、`origin.allowlist` 展示。
-- [ ] **harness_result 展示。** `triggered`/`evidence`/`why_failed`/`request`/`response` 结构化呈现，成功/失败一眼可辨。
+### P2.7 前端（`server/static/index.html`）
+- [x] `verifies` 第二类边；PoC Brief 查看；人工闸门（approve/deny/kill/allowlist/proxy traffic）。
 
-**P2 出口判据**：授权测试环境上，一条候选链能被验证 worker 实证到 `poc-confirmed`，全程流量留档、越界被拒、可一键中止；失败被结构化回写并反哺审计；**UI 能查看 Brief、verification 边与 harness 结果，且开火前的人工确认与 kill-switch 都在面板上可操作**。
+**P2 出口判据（契约层）**：verify 相、Brief、harness 回写、UI 闸门、allowlist/kill API 可用。  
+**P2 不保证（实测层，交 P3）**：explore 容器内可见用户代码；verify 能打出真实利用 body；示例配置含 verify worker；demo 靶标端到端可演示。
 
 ---
 
-## Later（明确后置，不阻塞上面）
+## P3 —— 能实际跑：代码进容器 + payload 实例化 + 可演示闭环
 
+**目标：给一份本地代码 + 一个测试站 URL，配好真实 LLM worker，系统能自动（或半自动）长出链并打到 `poc-confirmed`。**  
+原则：**能跑 > 细扣合规**。P2 已有的 allowlist/fire/kill/记账保留即可；mitm、netns、透明代理一律不进 P3。
+
+### 为何 P2 仍「跑不起来」（现状诊断，实施时对症下药）
+
+| 阻塞 | 根因 | 落点 |
+|---|---|---|
+| explore 看不到代码 | `explore`/`bootstrap`/`reason` 的 `ensure_running` **不传** `codebase_host_path`；只有 verify 挂了 | P3.2 |
+| 用户难填 origin | 建项 UI 仍是自由文本 Origin，结构化字段靠手写 JSON | P3.1 |
+| verify 打不出利用 | 开火收归 dispatcher 后，payload ≈ Brief 描述字符串 + 玩具 mutate；**无人实例化真实 body** | P3.3 |
+| 配置缺 verify 工人 | `dispatch.example.yaml` worker 只有 `bootstrap/reason/explore`，无 `verify`+`live_http` | P3.4 |
+| 无标准靶标/跑法 | 仓库无「刻意脆弱 demo + 一页 runbook」 | P3.5 / P3.6 |
+
+### P3.1 建项 UI：结构化 origin（前端）
+
+- [x] `server/static/index.html` 新建项目表单改为分栏（可保留「高级：raw JSON」折叠）：
+  - **代码库路径**（必填，host 侧绝对路径，即跑 dispatcher 那台机器能 bind 的路径）
+  - **commit**（可选）
+  - **测试站 base_url**（要做 verify 时必填）
+  - **credentials_ref**（可选，`secret:NAME` / `env:VAR`）
+  - **allowlist**（多行/标签；默认从 base_url 解析 host:port 预填）
+  - **goal**（沿用）
+- [x] 提交时拼成 origin JSON（与决策 #9 形状一致），不再让用户手写整坨 JSON。
+- [x] 文案提示：`path` 是 **dispatcher/Docker 宿主机路径**，不是浏览器本机路径（异机部署时写清）。
+
+### P3.2 代码挂进 static 容器（调度硬需求）
+
+- [x] `dispatcher/tasks/explore.py` / `bootstrap.py` / `reason.py`：从 project origin 解析 `codebase.path`，调用  
+  `container_manager.ensure_running(project_id, profile="static", codebase_host_path=...)`。
+- [x] path 不存在或不可读时：任务失败并写清日志/可观测错误（勿静默空挂）。
+- [x] `prompts/default/{bootstrap,explore,reason}.md`：写死工作目录约定  
+  `Codebase is mounted read-only at {codebase_mount_path}`（默认 `/workspace/codebase`，与 `ContainerConfig.codebase_mount_path` 一致）；要求 `locations` 用相对该根的 `file:line`。
+- [x] `prompting` / task 渲染：注入 `{codebase_mount_path}`（及可选 `{codebase_host_path}` 仅作说明）。
+- [x] 单测：mock ContainerManager，断言 explore/bootstrap 创建容器时带上 binds。
+
+### P3.3 verify 能构造真实利用（效果硬需求）
+
+P2 把「谁发包」收成 dispatcher；P3 补回「谁写 payload」，且**仍不让模型直接开 socket**。
+
+**推荐落地（窄腰，优先做）**：
+
+- [x] explore emit 增加可选 `payload_draft`（字符串：建议的 HTTP body / 关键表单字段值；**不是**完整攻击框架）。contracts + conclude 可落 evidence 或挂在 observation 上；Brief 组装时 `payload_recipe.shape` **优先取 chain 上最新非空 `payload_draft`**，否则再回落 description 拼接。
+- [x] `prompts/default/explore.md`：发现可利用 sink 时鼓励给出可打的 `payload_draft` + `oracle_draft`（成功判据字符串）。
+- [x] verify：`_initial_payload` 只用 Brief 的 shape/gadget/`payload_draft`；多轮时若仍 `no_signal`，允许 **一轮受限模型实例化**（可选开关 `tasks.verify.allow_model_instantiate`）：
+  - 输入：Brief + 上轮 `why_failed` +（可选）codebase 只读路径说明  
+  - 输出：仅 `{"payload_body":"...","headers"?:{}}`  
+  - 发包仍只走 `execute_allowed_request`（allowlist 硬拦）
+- [x] 无模型时的兜底：按 sink 描述关键词的 **最小模板表**（v1 可只覆盖 demo：如 body 含 `!!python` / 固定 `CAIRN_POC_OK` 探针），保证 demo 靶标可过。
+
+**不做（P3 明确砍掉）**：完整自主 exploit agent、浏览器自动化利用链、OOB 基础设施自建。
+
+### P3.4 配置与 worker 能力可跑
+
+- [x] `dispatch.example.yaml`：
+  - 至少一个 worker：`task_types` 含 `verify`，`capabilities` 含 `live_http`（可与 explore 分 worker 或同 worker）
+  - `tasks.verify.require_fire_approval: false` 作为 **demo 默认注释项**（生产可改 true）；或文档写清「演示时 UI 点 Approve」
+  - `container.verify` 示例（network 可达测试站即可）
+- [x] `dispatch_mock.yaml`：保持 mock 可演调度；可选加「强制 triggered」profile 方便 UI 演示。
+- [x] README 或 `docs/specs/` 短文：**最小可跑清单**（server / dispatcher / docker image / API key / origin 字段）。
+
+### P3.5 Demo 靶标 + 手工/半自动验收路径
+
+- [x] 仓库内加 **刻意脆弱小应用**（如 `examples/vuln_yaml_import/`：Flask `POST /api/import` + 不安全 yaml 或「body 含标记即回 `CAIRN_POC_OK`」双模式；后者保证无 LLM 也能验收 harness）。
+- [x] 提供 `origin` 样例 JSON + 期望图形态说明（source→dataflow→sink→verify→poc-confirmed）。
+- [x] 验收分两档：
+  1. **无 LLM**：seed facts 或 mock explore → verify harness → `poc-confirmed`（脚本/pytest 即可）
+  2. **有 LLM**：真实 worker 读挂载代码 → 自动 intent → 人工/自动 approve → 真站 `poc-confirmed`
+
+### P3.6 测试（对准「能跑」）
+
+- [x] 单测：static ensure_running 收到 codebase bind；缺 path 时行为明确。
+- [x] 单测：Brief 优先 `payload_draft`；verify 发出 body 与 draft 一致。
+- [x] 集成：起 demo 靶标 + `run_verify_task`（或等价）全链路到 `poc-confirmed`（不只手拼 conclude）。
+- [ ] （可选）mock e2e：从 create project 结构化 origin 到图上出现 verification 边。
+
+### P3.7 前端（可跑体验，非合规加戏）
+
+- [x] 建项结构化表单（见 P3.1）。
+- [x] 项目页展示「代码已挂载路径 / 容器内路径」只读信息（来自 origin + 约定 mount）。
+- [x] verify 面板：展示**实际发出的 payload_body**（从 proxy_traffic / harness evidence），便于判断「是不是还在 POST 描述文本」。
+- [x] demo 模式：`require_fire_approval=false` 时面板提示「已自动开火」；为 true 时 pending 列表保持现有 approve/deny。
+
+**P3 出口判据（硬）**：
+
+1. 用户在 UI 填 **本机代码路径 + 测试站 URL + goal**，不必手写 origin JSON。  
+2. explore/bootstrap 容器内 **只读可见** 该代码树，agent 能按 `file:line` 落富 fact。  
+3. 链齐后 verify 发出的 body **不是** fact 描述废话，而是 draft/模板/受限模型产出的可打 payload；对 demo 靶标能到 **`poc-confirmed`**。  
+4. `dispatch.example.yaml` 按文档改 key 后，真实 LLM 可调度 explore + verify。  
+5. 仓库内有 demo 靶标 + 一页跑通说明；至少一条自动化测试覆盖「挂载 + 真 HTTP + poc-confirmed」。
+
+**P3 明确不做**：mitm 网关、容器出站 iptables、凭证 KMS、多目标扫描产品化。
+
+---
+
+## Later（明确后置，不阻塞 P3 实测）
+
+- **合规加深**：透明 mitm 代理、verify 容器 netns/出站硬拦、逐请求人工 diff 闸门。
 - Codebase / Goal-Run **拆表**（现用"一 codebase 一 fact 存储 + goal tag"务实版顶着）。
 - 子图**向量检索 / LLM rank**（结构遍历返回也爆时才上）。
 - `preconditions` / `chain`-ID **自动修复**。
 - `gadget` / `reachability` fact 类型（v1 先 source/sink/dataflow/constraint + verification 五类）。
-- 网关/反代重写下的路由映射自动化（靠 verify worker 现场解析兜底）。
+- 网关/反代重写下的路由映射自动化（靠 verify 现场解析 + routing_map 回补）。
+- OOB/timing oracle 基建（外部监听与 token 关联）。
 
 ---
 
@@ -203,11 +301,16 @@
 | `ContainerConfig` | 单 profile → static/verify 双 profile | #8/#14 | P2 |
 | PoC Brief | server/dispatcher 组装，Reason 只吐粗意图 | #13 | P2 |
 | harness_result | 新契约 → conclude 回写 | 设计契约4 | P2 |
+| 建项 UI | 结构化 codebase/target/allowlist → origin JSON | #9 | **P3** |
+| static 挂载 | explore/bootstrap/reason 传 `codebase_host_path` | #14 | **P3** |
+| explore emit | 可选 `payload_draft` → Brief.shape 优先 | #5/#13 | **P3** |
+| verify 实例化 | 可选受限模型只吐 `payload_body`；发包仍走 harness | #11/#13 | **P3** |
 
 ## 风险与验证
 
 - **迁移风险**：facts 表加列要兼容存量项目（保留 `origin`/`goal` 行、缺省字段可空）。上线前对现有 DB 跑一次迁移演练。
 - **窄腰回归**：每次改 prompt/emit 都要回归"模型有没有被要求填门控字段"（confidence 高档位、code_version、id）。
 - **append-only 回归**：加一条测试断言"任何 conclude 都不 UPDATE 已存在 fact 的内容字段"。
-- **合规**：P2 上线前，allowlist 拒绝、kill-switch、代理留档三项必须有自动化测试，不能只靠人工。
-- **前端隐形回归**：`index.html` 无构建、无类型检查，富字段"忘了显"不会报错、只会静默隐形（P0 已出现：附属 fact 变孤点、type 不配色）。判据是"看图能不能一眼读出 type/confidence"，而非"接口有没有返回字段"。合规闸门面板还需人工走查 approve/deny/kill-switch 的实际生效。
+- **能跑优先（P3）**：出口以 demo 靶标 + 挂载 + 真实 POST body 为准；合规加深不进 P3 出口。
+- **路径语义**：UI 填的 codebase path 是 dispatcher 宿主机路径；Docker Desktop / 远程 dispatcher 场景需在 runbook 写清，避免「浏览器本机路径」误解。
+- **前端隐形回归**：`index.html` 无构建、无类型检查，富字段"忘了显"不会报错、只会静默隐形。判据是"看图能不能一眼读出 type/confidence"，而非"接口有没有返回字段"。

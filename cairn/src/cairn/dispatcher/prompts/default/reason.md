@@ -36,8 +36,14 @@ If Goal has been satisfied, return:
 
 If Goal has not been satisfied but new intents should be proposed, return:
 ```json
-{"accepted": true, "data": {"intents": [{"from": ["f001"], "description": "..."}, {"from": ["f002", "f003"], "description": "..."}]}}
+{"accepted": true, "data": {"intents": [{"from": ["f001"], "description": "..."}, {"from": ["f002", "f003"], "description": "...", "task_kind": "verify"}]}}
 ```
+
+When a candidate chain is already complete at static-confirmed (source→dataflow→sink, constraints understood) and needs runtime proof, propose a **verify** intent:
+- `from`: ordered chain fact ids (source … sink, include constraints to bypass)
+- `description`: short note like `VERIFY chain for unauth RCE via yaml.load`
+- `task_kind`: `"verify"` (required for verification routing; server assembles PoC Brief — do **not** fill Brief fields yourself)
+
 
 If Goal has not been satisfied and no new intent should currently be proposed, return:
 ```json
@@ -47,6 +53,7 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 ## Rules
 - First determine whether the facts already satisfy Goal. For code audit goals (e.g. "unauth RCE"), Goal is satisfied when a chain from source to sink reaches `poc-confirmed` effective confidence (or when a human Hint explicitly confirms the chain). If no runtime verification is available, the chain must at minimum have `static-confirmed` source→sink dataflow with a clear attack surface analysis.
 - If Goal is not satisfied, reflect on why it has not been reached. Consider the confidence levels of discovered facts: static-confirmed facts may need verification; hypothesized facts may need deeper exploration; refuted paths should not be reinvestigated.
+- When a static chain looks complete but lacks `poc-confirmed`, prefer proposing one `task_kind: "verify"` intent over more explore intents on the same path.
 - Use fact `type` to reason about the attack surface: `source` nodes define entry points, `sink` nodes define exploitation targets, `dataflow` nodes connect them, `constraint` nodes are obstacles that may need bypassing.
 - Determine whether there are `Open Intents`, meaning intents that have already been declared but have not yet reached a conclusion. If there are open intents, compare the known clues in hints and facts to infer whether the current intents already cover all known clues, and whether new intents are necessary.
 - If `Open Intents` is empty, you must propose new intents.
@@ -55,6 +62,8 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 - Each Intent should be a high-value exploration direction. It does not need to be overly detailed. Focus on the core insight and a clear direction. Do not be too broad, do not output redundant details that do not help advance Goal, and do not be overly specific. The main requirement is that each intent is an independent, clearly defined, high-value direction.
 - An Intent may originate from multiple facts.
 - Different intents should cover different exploration dimensions and avoid duplication or heavy overlap.
+
+- Codebase is mounted read-only at `{codebase_mount_path}` when a path is configured (host: `{codebase_host_path}`).
 
 ## Context
 ### Graph
@@ -70,4 +79,9 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 ### Open Intents
 ```
 {open_intents}
+```
+
+### Codebase mount
+```
+{codebase_mount_path}
 ```

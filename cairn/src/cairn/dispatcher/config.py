@@ -10,10 +10,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-TaskType = Literal["reason", "explore", "bootstrap"]
+TaskType = Literal["reason", "explore", "bootstrap", "verify"]
+WorkerCapability = Literal["static_fs", "live_http", "browser"]
 WorkerType = Literal["claudecode", "codex", "pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
+ContainerProfileName = Literal["static", "verify"]
 
 WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
     "claudecode": (
@@ -36,11 +38,13 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 }
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
-    "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}"),
-    "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
-    "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+    "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}", "{codebase_mount_path}"),
+    "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{codebase_mount_path}"),
+    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{codebase_mount_path}"),
+    "bootstrap.md": ("{origin}", "{goal}", "{hints}", "{codebase_mount_path}"),
+    "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}", "{codebase_mount_path}"),
+    "verify.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{poc_brief}"),
+    "verify_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{poc_brief}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
@@ -50,6 +54,8 @@ PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
         "explore_conclude.md": ("{intent_id}",),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
         "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+        "verify.md": ("{intent_id}", "{poc_brief}"),
+        "verify_conclude.md": ("{intent_id}", "{poc_brief}"),
     }
 }
 
@@ -60,6 +66,8 @@ MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "explore_conclude": frozenset({"fact", "observations", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "verify_execute": frozenset({"triggered", "refuted", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "verify_conclude": frozenset({"triggered", "refuted", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -122,6 +130,28 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
+    "verify_execute": {
+        "delay": [0.05, 0.3],
+        "outcomes": {
+            "triggered": "0.7",
+            "refuted": "0.3",
+            "rejected": "0.0",
+            "invalid_json": "0.0",
+            "invalid_payload": "0.0",
+            "command_fail": "0.0",
+        },
+    },
+    "verify_conclude": {
+        "delay": [0.05, 0.3],
+        "outcomes": {
+            "triggered": "0.7",
+            "refuted": "0.3",
+            "rejected": "0.0",
+            "invalid_json": "0.0",
+            "invalid_payload": "0.0",
+            "command_fail": "0.0",
+        },
+    },
 }
 
 MOCK_ALLOWED_ENV_KEYS = frozenset(
@@ -144,10 +174,43 @@ class BootstrapTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
+class VerifyTaskConfig(BaseModel):
+    timeout: int = Field(gt=0)
+    conclude_timeout: int = Field(gt=0)
+    require_fire_approval: bool = True
+    # Dispatcher-owned fire path (decision #8/#9): model never opens sockets.
+    force_harness: bool = True
+    max_rounds: int = Field(gt=0, default=3)
+    # Optional forced audit proxy URL injected into harness opener.
+    proxy_url: str | None = None
+    # Optional: one restricted model round that only returns payload_body/headers.
+    allow_model_instantiate: bool = False
+
+
 class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
     reason: ReasonTaskConfig
     explore: ExploreTaskConfig
+    verify: VerifyTaskConfig = Field(
+        default_factory=lambda: VerifyTaskConfig(timeout=900, conclude_timeout=180, require_fire_approval=True)
+    )
+
+
+class ContainerProfileConfig(BaseModel):
+    image: str | None = None
+    network_mode: str | None = None
+    cap_add: list[str] | None = None
+    # verify-only: inject these env keys (values resolved from host env/secret store)
+    env: dict[str, str] | None = None
+
+
+class ResolvedContainerProfile(BaseModel):
+    image: str
+    network_mode: str
+    cap_add: list[str] = Field(default_factory=list)
+    name: ContainerProfileName = "static"
+    environment: dict[str, str] = Field(default_factory=dict)
+    binds: list[str] = Field(default_factory=list)  # docker binds host:container:mode
 
 
 class ContainerConfig(BaseModel):
@@ -155,6 +218,52 @@ class ContainerConfig(BaseModel):
     network_mode: str
     completed_action: CompletedAction
     cap_add: list[str] = Field(default_factory=list)
+    static: ContainerProfileConfig | None = None
+    verify: ContainerProfileConfig | None = None
+    # container path where codebase is mounted read-only on both profiles
+    codebase_mount_path: str = "/workspace/codebase"
+
+    def resolve_profile(
+        self,
+        name: ContainerProfileName,
+        *,
+        codebase_host_path: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> ResolvedContainerProfile:
+        override = self.static if name == "static" else self.verify
+        image = (override.image if override and override.image else None) or self.image
+        network_mode = (
+            (override.network_mode if override and override.network_mode else None) or self.network_mode
+        )
+        if override and override.cap_add is not None:
+            cap_add = list(override.cap_add)
+        else:
+            cap_add = list(self.cap_add)
+        environment: dict[str, str] = {}
+        if override and override.env:
+            environment.update(override.env)
+        if extra_env:
+            environment.update(extra_env)
+        # credentials / outbound only on verify profile
+        if name != "verify":
+            # strip credential-looking keys from static
+            environment = {
+                k: v
+                for k, v in environment.items()
+                if not any(tok in k.upper() for tok in ("SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "API_KEY"))
+            }
+        binds: list[str] = []
+        if codebase_host_path:
+            host = codebase_host_path.replace("\\", "/")
+            binds.append(f"{host}:{self.codebase_mount_path}:ro")
+        return ResolvedContainerProfile(
+            image=image,
+            network_mode=network_mode,
+            cap_add=cap_add,
+            name=name,
+            environment=environment,
+            binds=binds,
+        )
 
 
 class RuntimeConfig(BaseModel):
@@ -173,6 +282,7 @@ class WorkerConfig(BaseModel):
     name: str
     type: WorkerType
     task_types: list[TaskType]
+    capabilities: list[WorkerCapability] = Field(default_factory=lambda: ["static_fs"])
     max_running: int = Field(gt=0)
     priority: int = Field(ge=0)
     env: dict[str, str] = Field(default_factory=dict)
@@ -185,6 +295,19 @@ class WorkerConfig(BaseModel):
         if len(set(value)) != len(value):
             raise ValueError("task_types must be unique")
         return value
+
+    @field_validator("capabilities")
+    @classmethod
+    def validate_capabilities(cls, value: list[WorkerCapability]) -> list[WorkerCapability]:
+        if not value:
+            raise ValueError("capabilities must not be empty")
+        if len(set(value)) != len(value):
+            raise ValueError("capabilities must be unique")
+        return value
+
+    def has_capabilities(self, required: list[WorkerCapability] | set[WorkerCapability]) -> bool:
+        have = set(self.capabilities)
+        return set(required).issubset(have)
 
     @model_validator(mode="after")
     def validate_env(self) -> "WorkerConfig":

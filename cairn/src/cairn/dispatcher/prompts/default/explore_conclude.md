@@ -36,6 +36,8 @@ You may also return a single observation:
 - `description` must be an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler. Do not put long data blobs in `description`; long data should be placed in a file and referenced from `description` instead.
 - `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
 - If findings contradict a `base_knowledge` entry, include `base_knowledge_patches` with existing `entry_id` only. Fill `statement` / `evidence` / `confidence` (`assumed` or `code-confirmed`). Never fill `revised_by`, `version`, or claim `live-confirmed`.
+- Prefer `file:line` locations relative to the read-only codebase mount `{codebase_mount_path}`.
+- When a confirmed sink is exploitable, include `payload_draft` (suggested HTTP body) and `oracle_draft` (success marker) on that observation.
 
 # Context
 ## Graph
@@ -51,4 +53,9 @@ You may also return a single observation:
 ## Current Intent Description
 ```
 {intent_description}
+```
+
+## Codebase mount
+```
+{codebase_mount_path}
 ```

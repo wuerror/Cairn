@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 import json
 import logging
 
@@ -14,6 +14,8 @@ from cairn.server.models import (
 )
 from cairn.server.services import (
     AUDIT_MAX_CONFIDENCE,
+    VERIFICATION_CONFIDENCE_LEVELS,
+    assemble_poc_brief,
     check_project_active,
     compute_code_version,
     find_existing_fact,
@@ -37,6 +39,7 @@ LOG = logging.getLogger(__name__)
 router = APIRouter(tags=["intents"])
 
 MAIN_FACT_TYPE_PRIORITY: list[str] = ["dataflow", "sink", "source", "constraint", "verification"]
+VERIFY_MAIN_FACT_TYPE_PRIORITY: list[str] = ["verification", "constraint", "dataflow", "sink", "source"]
 
 
 @router.post(
@@ -54,8 +57,24 @@ def create_intent(project_id: str, body: CreateIntentRequest):
         now = utcnow()
         iid = next_intent_id(conn, project_id)
         claimed = body.worker is not None
+        task_kind = body.task_kind
+        # Heuristic: description starting with VERIFY: also marks verify intent
+        if task_kind is None and body.description.upper().startswith("VERIFY"):
+            task_kind = "verify"
+        if task_kind is None:
+            task_kind = "explore"
+
+        poc_brief_json = None
+        fire_status = None
+        if task_kind == "verify":
+            brief = assemble_poc_brief(conn, project_id, body.from_, body.description)
+            poc_brief_json = brief.model_dump_json()
+            fire_status = "pending"
+
         conn.execute(
-            "INSERT INTO intents (id, project_id, to_fact_id, description, creator, worker, last_heartbeat_at, created_at, concluded_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL)",
+            """INSERT INTO intents
+               (id, project_id, to_fact_id, description, creator, worker, last_heartbeat_at, created_at, concluded_at, task_kind, poc_brief, fire_status)
+               VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)""",
             (
                 iid,
                 project_id,
@@ -64,6 +83,9 @@ def create_intent(project_id: str, body: CreateIntentRequest):
                 body.worker,
                 now if claimed else None,
                 now,
+                task_kind,
+                poc_brief_json,
+                fire_status,
             ),
         )
         for fid in body.from_:
@@ -72,17 +94,11 @@ def create_intent(project_id: str, body: CreateIntentRequest):
                 (iid, project_id, fid),
             )
 
-        return Intent(
-            id=iid,
-            **{"from": body.from_},
-            to=None,
-            description=body.description,
-            creator=body.creator,
-            worker=body.worker,
-            last_heartbeat_at=now if claimed else None,
-            created_at=now,
-            concluded_at=None,
-        )
+        row = conn.execute(
+            "SELECT * FROM intents WHERE id = ? AND project_id = ?",
+            (iid, project_id),
+        ).fetchone()
+        return intent_to_model(conn, row, project_id)
 
 
 @router.post(
@@ -136,7 +152,9 @@ def release(project_id: str, intent_id: str, body: HeartbeatRequest):
 def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
-        get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)
+        intent_row = get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)
+        intent_keys = intent_row.keys()
+        is_verify = ("task_kind" in intent_keys and intent_row["task_kind"] == "verify")
 
         now = utcnow()
         batch_id = f"b{intent_id}_{utcnow().replace('-', '').replace(':', '').replace('T', '').replace('Z', '')}"
@@ -154,10 +172,39 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
 
         created_facts: list[Fact] = []
         for obs in observations:
-            obs_confidence = obs.type is not None and AUDIT_MAX_CONFIDENCE or None
+            is_verification = obs.type == "verification"
+            target_code_version: str | None = None
+            if is_verification:
+                obs_confidence = obs.confidence or "poc-confirmed"
+                if obs_confidence not in VERIFICATION_CONFIDENCE_LEVELS:
+                    obs_confidence = "poc-confirmed"
+                verifies = obs.verifies
+                if not verifies:
+                    raise HTTPException(400, "verification observation requires verifies")
+                # ensure target exists; stamp verification with target code_version for folding
+                target = conn.execute(
+                    "SELECT id, code_version FROM facts WHERE project_id = ? AND id = ?",
+                    (project_id, verifies),
+                ).fetchone()
+                if target is None:
+                    raise HTTPException(400, f"verifies target not found: {verifies}")
+                target_code_version = target["code_version"]
+            else:
+                # audit path: force max static-confirmed when typed
+                if obs.confidence and obs.confidence in VERIFICATION_CONFIDENCE_LEVELS:
+                    raise HTTPException(
+                        400,
+                        f"Audit-side facts cannot claim {obs.confidence}; use type=verification",
+                    )
+                obs_confidence = AUDIT_MAX_CONFIDENCE if obs.type is not None else None
+                verifies = None
             gate_confidence(obs.type, obs_confidence)
 
-            existing = find_existing_fact(conn, project_id, obs.type, obs.locations)
+            # verification never dedupes; constraint with empty locations + why_failed uses degenerate key
+            if not is_verification:
+                existing = find_existing_fact(conn, project_id, obs.type, obs.locations)
+            else:
+                existing = None
             if existing is not None:
                 merged_locations_json = merge_locations(
                     parse_json_list(existing["locations"]),
@@ -182,32 +229,48 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                     verifies=existing["verifies"],
                     intent_id=existing["intent_id"],
                     batch_id=existing["batch_id"],
+                    oracle_draft=existing["oracle_draft"] if "oracle_draft" in existing.keys() else None,
+                    payload_draft=existing["payload_draft"] if "payload_draft" in existing.keys() else None,
                 ))
                 continue
 
             fid = next_fact_id(conn, project_id)
-            code_version = compute_code_version(obs.locations, origin_desc)
+            # verification inherits target stamp so effective_confidence folding is not false-stale
+            if is_verification and target_code_version:
+                code_version = target_code_version
+            else:
+                code_version = compute_code_version(obs.locations, origin_desc)
             locations_json = json.dumps(sorted(obs.locations)) if obs.locations else None
+            evidence = obs.evidence
+            if obs.why_failed and not is_verification:
+                why = json.dumps(obs.why_failed, ensure_ascii=False)
+                evidence = f"{evidence}\n[why_failed] {why}" if evidence else f"[why_failed] {why}"
 
             conn.execute(
                 """INSERT INTO facts (id, project_id, description, type, confidence,
-                   locations, code_version, evidence, verifies, intent_id, batch_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   locations, code_version, evidence, verifies, intent_id, batch_id,
+                   oracle_draft, payload_draft)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     fid, project_id, obs.description, obs.type, obs_confidence,
-                    locations_json, code_version, obs.evidence, None, intent_id, batch_id,
+                    locations_json, code_version, evidence, verifies, intent_id, batch_id,
+                    obs.oracle_draft, obs.payload_draft,
                 ),
             )
             created_facts.append(_row_to_fact(
                 id=fid, description=obs.description, obs_type=obs.type,
                 obs_confidence=obs_confidence, obs_locations=locations_json,
-                code_version=code_version, evidence=obs.evidence,
-                verifies=None, intent_id=intent_id, batch_id=batch_id,
+                code_version=code_version, evidence=evidence,
+                verifies=verifies, intent_id=intent_id, batch_id=batch_id,
+                oracle_draft=obs.oracle_draft,
+                payload_draft=obs.payload_draft,
             ))
 
-        main_fact = _select_main_fact(created_facts)
+        main_fact = _select_main_fact(created_facts, verify=is_verify)
         conn.execute(
-            "UPDATE intents SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ? WHERE id = ? AND project_id = ?",
+            """UPDATE intents SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ?,
+               fire_status = CASE WHEN task_kind = 'verify' THEN 'fired' ELSE fire_status END
+               WHERE id = ? AND project_id = ?""",
             (main_fact.id, body.worker, now, now, intent_id, project_id),
         )
 
@@ -275,6 +338,8 @@ def _row_to_fact(
     verifies: str | None = None,
     intent_id: str | None = None,
     batch_id: str | None = None,
+    oracle_draft: str | None = None,
+    payload_draft: str | None = None,
 ) -> Fact:
     return Fact(
         id=id,
@@ -287,11 +352,14 @@ def _row_to_fact(
         verifies=verifies,
         intent_id=intent_id,
         batch_id=batch_id,
+        oracle_draft=oracle_draft,
+        payload_draft=payload_draft,
     )
 
 
-def _select_main_fact(facts: list[Fact]) -> Fact:
-    for priority_type in MAIN_FACT_TYPE_PRIORITY:
+def _select_main_fact(facts: list[Fact], *, verify: bool = False) -> Fact:
+    priority = VERIFY_MAIN_FACT_TYPE_PRIORITY if verify else MAIN_FACT_TYPE_PRIORITY
+    for priority_type in priority:
         for f in facts:
             if f.type == priority_type:
                 return f

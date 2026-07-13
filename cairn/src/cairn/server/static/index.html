@@ -608,6 +608,10 @@
           :class="sideTab === 'hints' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
           Hints <span class="ml-0.5 text-[10px] opacity-60" x-text="project.hints.length"></span>
         </button>
+        <button @click="sideTab = 'verify'; loadVerifyPanel()" class="flex-1 px-2 py-2.5 text-xs font-medium transition"
+          :class="sideTab === 'verify' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
+          Verify
+        </button>
         <button @click="sideTab = 'log'" class="flex-1 px-2 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Log</button>
       </div>
@@ -873,6 +877,158 @@
         </section>
       </div>
 
+      <!-- Verify / compliance panel -->
+      <div x-show="sideTab === 'verify'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-emerald-50/20">
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden" x-show="isJsonOrigin()">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+            <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Codebase mount</p>
+          </div>
+          <div class="p-3 text-[11px] space-y-1.5 font-mono">
+            <div class="flex justify-between gap-2"><span class="text-slate-400">host</span><span class="text-slate-700 text-right break-all" x-text="(parsedOrigin().codebase||{}).path || '—'"></span></div>
+            <div class="flex justify-between gap-2"><span class="text-slate-400">container</span><span class="text-slate-700">/workspace/codebase</span></div>
+            <div class="flex justify-between gap-2"><span class="text-slate-400">mode</span><span class="text-slate-700">read-only bind</span></div>
+          </div>
+        </section>
+
+        <section class="rounded-2xl border border-amber-200 bg-amber-50/40 shadow-sm overflow-hidden">
+          <div class="p-3 text-[11px] text-amber-900">
+            <template x-if="pendingVerifyIntents().length === 0">
+              <p><span class="font-semibold">Fire mode:</span> no pending approvals — if dispatcher has <code class="font-mono">require_fire_approval: false</code>, verify auto-fires.</p>
+            </template>
+            <template x-if="pendingVerifyIntents().length > 0">
+              <p><span class="font-semibold">Fire mode:</span> <span x-text="pendingVerifyIntents().length"></span> verify intent(s) await Approve (or set require_fire_approval false for demo).</p>
+            </template>
+          </div>
+        </section>
+
+        <section class="rounded-2xl border border-emerald-200 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-3 border-b border-emerald-100 bg-emerald-50/80 flex items-center justify-between gap-2">
+            <div>
+              <p class="text-[10px] font-semibold text-emerald-700 uppercase tracking-widest">Kill Switch</p>
+              <p class="text-[11px] text-slate-500 mt-0.5">Abort all in-flight verify tasks</p>
+            </div>
+            <button type="button" @click="killVerify()"
+              class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 text-white hover:bg-rose-700 transition">
+              Kill Verify
+            </button>
+          </div>
+          <div class="p-3 text-[11px] text-slate-600 space-y-1">
+            <p>Status: <span class="font-semibold" :class="verifyControl.kill_requested ? 'text-rose-600' : 'text-emerald-600'"
+              x-text="verifyControl.kill_requested ? 'KILL REQUESTED' : 'armed'"></span></p>
+            <template x-if="verifyControl.kill_requested">
+              <p class="text-slate-500" x-text="`${verifyControl.kill_actor || ''} · ${verifyControl.kill_reason || ''} · ${formatTime(verifyControl.kill_requested_at)}`"></p>
+            </template>
+            <button type="button" x-show="verifyControl.kill_requested" @click="clearVerifyKill()"
+              class="mt-1 text-[11px] text-brand-600 hover:underline">Clear kill flag</button>
+          </div>
+        </section>
+
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+            <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Allowlist</p>
+          </div>
+          <div class="p-3 space-y-1">
+            <template x-if="!verifyAllowlist.length">
+              <p class="text-sm text-slate-300 text-center py-2">Empty (fail-closed)</p>
+            </template>
+            <template x-for="host in verifyAllowlist" :key="host">
+              <div class="font-mono text-[11px] bg-slate-50 border border-slate-100 rounded px-2 py-1" x-text="host"></div>
+            </template>
+          </div>
+        </section>
+
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+            <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Pending Fire Approvals</p>
+          </div>
+          <div class="p-3 space-y-2">
+            <template x-if="pendingVerifyIntents().length === 0">
+              <p class="text-sm text-slate-300 text-center py-2">No pending verify intents</p>
+            </template>
+            <template x-for="intent in pendingVerifyIntents()" :key="intent.id">
+              <article class="rounded-xl border border-slate-100 bg-slate-50/70 p-3 space-y-2">
+                <div class="flex items-center gap-2">
+                  <span class="font-mono text-[10px] font-bold text-slate-600" x-text="intent.id"></span>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700" x-text="intent.fire_status || 'pending'"></span>
+                </div>
+                <p class="text-xs text-slate-700" x-text="intent.description"></p>
+                <template x-if="intent.poc_brief">
+                  <pre class="text-[10px] font-mono bg-white border border-slate-100 rounded p-2 overflow-x-auto max-h-40" x-text="JSON.stringify(intent.poc_brief, null, 2)"></pre>
+                </template>
+                <div class="flex gap-2">
+                  <button type="button" @click="approveFire(intent.id)"
+                    class="flex-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>
+                  <button type="button" @click="denyFire(intent.id)"
+                    class="flex-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300">Deny</button>
+                </div>
+              </article>
+            </template>
+          </div>
+        </section>
+
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80 flex items-center justify-between">
+            <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Proxy Traffic / payload_body</p>
+            <button type="button" @click="loadVerifyPanel()" class="text-[10px] text-brand-600 hover:underline">Refresh</button>
+          </div>
+          <div class="p-3 space-y-2">
+            <p class="text-[10px] text-slate-400">Inspect actual fire bodies — should be draft/template, not fact description prose.</p>
+            <template x-if="!proxyTraffic.length">
+              <p class="text-sm text-slate-300 text-center py-2">No traffic recorded</p>
+            </template>
+            <template x-for="t in proxyTraffic" :key="t.id">
+              <article class="rounded-xl border border-slate-100 bg-slate-50/70 p-3 space-y-1.5 text-[11px]">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="font-mono font-bold text-slate-600" x-text="t.id"></span>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                    :class="{
+                      'bg-emerald-50 text-emerald-700': t.status === 'approved' || t.status === 'recorded',
+                      'bg-rose-50 text-rose-700': t.status === 'blocked' || t.status === 'denied',
+                      'bg-slate-100 text-slate-600': true
+                    }" x-text="t.status"></span>
+                </div>
+                <p class="text-slate-500" x-text="formatTime(t.created_at)"></p>
+                <template x-if="extractPayloadBody(t.request)">
+                  <div class="rounded-lg border border-emerald-100 bg-emerald-50/50 p-2">
+                    <p class="text-[10px] font-semibold text-emerald-700 mb-1">payload_body</p>
+                    <pre class="font-mono text-[10px] whitespace-pre-wrap break-all" x-text="extractPayloadBody(t.request)"></pre>
+                  </div>
+                </template>
+                <pre class="font-mono text-[10px] bg-white border border-slate-100 rounded p-2 overflow-x-auto whitespace-pre-wrap" x-text="t.request"></pre>
+                <template x-if="t.response">
+                  <pre class="font-mono text-[10px] bg-white border border-slate-100 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-28" x-text="t.response"></pre>
+                </template>
+              </article>
+            </template>
+          </div>
+        </section>
+
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+            <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Verify Intents / Briefs</p>
+          </div>
+          <div class="p-3 space-y-2">
+            <template x-for="intent in verifyIntents()" :key="intent.id">
+              <article class="rounded-xl border border-slate-100 bg-slate-50/70 p-3 space-y-1.5">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-[10px] font-bold" x-text="intent.id"></span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700" x-text="intent.task_kind || 'verify'"></span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" x-text="intent.fire_status || '-'"></span>
+                  <span class="text-[10px] text-slate-400" x-text="intent.to ? `→ ${intent.to}` : 'open'"></span>
+                </div>
+                <p class="text-xs text-slate-700" x-text="intent.description"></p>
+                <template x-if="intent.poc_brief">
+                  <details>
+                    <summary class="text-[11px] text-brand-600 cursor-pointer">PoC Brief</summary>
+                    <pre class="mt-1 text-[10px] font-mono bg-white border border-slate-100 rounded p-2 overflow-x-auto" x-text="JSON.stringify(intent.poc_brief, null, 2)"></pre>
+                  </details>
+                </template>
+              </article>
+            </template>
+          </div>
+        </section>
+      </div>
+
       <!-- Hints -->
       <div x-show="sideTab === 'hints'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-amber-50/25">
         <template x-if="project.hints.length === 0">
@@ -962,16 +1118,35 @@
 
 <!-- New Project -->
 <div x-show="showNewProject" x-cloak class="fixed inset-0 z-50 flex items-center justify-center overlay" @click.self="showNewProject = false">
-  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 border border-slate-200/60" @click.stop>
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-xl p-6 border border-slate-200/60 max-h-[90vh] overflow-y-auto" @click.stop>
     <h3 class="text-base font-semibold text-slate-700 mb-4">New Project</h3>
     <div class="space-y-3">
       <input x-model="newProject.title" placeholder="Project title" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300">
-      <textarea x-model="newProject.origin" placeholder="Origin — starting point" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300"></textarea>
-      <textarea x-model="newProject.goal" placeholder="Goal — what to achieve" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300"></textarea>
+      <textarea x-model="newProject.goal" placeholder="Goal — e.g. unauth RCE via yaml.load" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300"></textarea>
+
+      <div class="rounded-xl border border-slate-200 bg-slate-50/60 p-3 space-y-2">
+        <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Codebase (required)</p>
+        <input x-model="newProject.codebasePath" @input="onBaseUrlChange()" placeholder="Host absolute path (dispatcher machine)" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300 font-mono">
+        <p class="text-[10px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1">Path is on the <strong>dispatcher/Docker host</strong>, not the browser machine.</p>
+        <input x-model="newProject.commit" placeholder="Commit (optional)" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300 font-mono">
+      </div>
+
+      <div class="rounded-xl border border-slate-200 bg-slate-50/60 p-3 space-y-2">
+        <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Live target (for verify)</p>
+        <input x-model="newProject.baseUrl" @input="onBaseUrlChange()" placeholder="Test site base_url — e.g. http://127.0.0.1:18080" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300 font-mono">
+        <input x-model="newProject.credentialsRef" placeholder="credentials_ref optional — secret:NAME or env:VAR" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300 font-mono">
+        <textarea x-model="newProject.allowlistText" placeholder="allowlist — one host:port per line" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300 font-mono"></textarea>
+      </div>
+
       <label class="flex items-center gap-2 px-1 text-sm text-slate-600">
         <input type="checkbox" x-model="newProject.bootstrap" class="h-4 w-4 rounded border-slate-300 text-brand-500 focus:ring-brand-200">
         <span>Run bootstrap attempt</span>
       </label>
+
+      <details class="rounded-xl border border-slate-200 p-3">
+        <summary class="text-[11px] font-semibold text-slate-500 cursor-pointer select-none">Advanced: raw origin JSON</summary>
+        <textarea x-model="newProject.originRaw" placeholder='Optional override — full origin JSON' rows="4" class="mt-2 w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300"></textarea>
+      </details>
 
       <div>
         <div class="flex items-center justify-between mb-2">
@@ -989,7 +1164,7 @@
     </div>
     <div class="flex justify-end gap-2 mt-5">
       <button @click="showNewProject = false" class="px-4 py-2 text-sm text-slate-500 hover:bg-slate-50 rounded-xl transition">Cancel</button>
-      <button @click="createProject()" :disabled="!newProject.title || !newProject.origin || !newProject.goal"
+      <button @click="createProject()" :disabled="!canCreateProject()"
         class="px-5 py-2 text-sm bg-brand-500 text-white rounded-xl font-medium hover:bg-brand-600 transition disabled:opacity-30 shadow-sm shadow-brand-200">Create</button>
     </div>
   </div>
@@ -1249,6 +1424,9 @@ function cairnApp() {
     sideTab: 'detail',
     focusGoalSubgraph: false,
     goalSubgraphFactIds: null,
+    verifyControl: { kill_requested: false },
+    verifyAllowlist: [],
+    proxyTraffic: [],
     selectedNode: null,
     selectedFacts: [],
     selectedTimelineEntryId: null,
@@ -1270,7 +1448,11 @@ function cairnApp() {
     exportProjectId: '',
     showDeleteModal: false,
 
-    newProject: { title: '', origin: '', goal: '', bootstrap: true, hints: [{ content: '' }] },
+    newProject: {
+      title: '', goal: '', bootstrap: true, hints: [{ content: '' }],
+      codebasePath: '', commit: '', baseUrl: '', credentialsRef: '',
+      allowlistText: '', originRaw: '',
+    },
     intentForm: { description: '' },
     concludeForm: { description: '', intentId: '' },
     completeForm: { description: '' },
@@ -1782,6 +1964,71 @@ function cairnApp() {
         this.goalSubgraphFactIds = null;
       }
       this.updateGraph();
+    },
+
+    verifyIntents() {
+      if (!this.project) return [];
+      return (this.project.intents || []).filter(i =>
+        i.task_kind === 'verify' || i.poc_brief || (i.description || '').toUpperCase().startsWith('VERIFY')
+      );
+    },
+
+    pendingVerifyIntents() {
+      return this.verifyIntents().filter(i => !i.to && (i.fire_status === 'pending' || !i.fire_status));
+    },
+
+    async loadVerifyPanel() {
+      if (!this.selectedProjectId) return;
+      try {
+        this.verifyControl = await this.api('GET', `/projects/${this.selectedProjectId}/verify/control`);
+      } catch (e) { this.verifyControl = { kill_requested: false }; }
+      try {
+        const al = await this.api('GET', `/projects/${this.selectedProjectId}/verify/allowlist`);
+        this.verifyAllowlist = al.allowlist || [];
+      } catch (e) { this.verifyAllowlist = []; }
+      try {
+        this.proxyTraffic = await this.api('GET', `/projects/${this.selectedProjectId}/verify/proxy_traffic`);
+      } catch (e) { this.proxyTraffic = []; }
+    },
+
+    async killVerify() {
+      if (!this.selectedProjectId) return;
+      try {
+        this.verifyControl = await this.api('POST', `/projects/${this.selectedProjectId}/verify/kill`, {
+          actor: 'human', reason: 'kill-switch',
+        });
+        this.showToast('Verify kill-switch activated', 'ok');
+      } catch (e) { this.showToast(e.message, 'error'); }
+    },
+
+    async clearVerifyKill() {
+      if (!this.selectedProjectId) return;
+      try {
+        this.verifyControl = await this.api('POST', `/projects/${this.selectedProjectId}/verify/kill/clear`, {});
+        this.showToast('Kill flag cleared', 'ok');
+      } catch (e) { this.showToast(e.message, 'error'); }
+    },
+
+    async approveFire(intentId) {
+      if (!this.selectedProjectId) return;
+      try {
+        await this.api('POST', `/projects/${this.selectedProjectId}/intents/${intentId}/fire`, {
+          action: 'approve', actor: 'human',
+        });
+        await this.loadProject(this.selectedProjectId);
+        this.showToast(`Fire approved for ${intentId}`, 'ok');
+      } catch (e) { this.showToast(e.message, 'error'); }
+    },
+
+    async denyFire(intentId) {
+      if (!this.selectedProjectId) return;
+      try {
+        await this.api('POST', `/projects/${this.selectedProjectId}/intents/${intentId}/fire`, {
+          action: 'deny', actor: 'human',
+        });
+        await this.loadProject(this.selectedProjectId);
+        this.showToast(`Fire denied for ${intentId}`, 'ok');
+      } catch (e) { this.showToast(e.message, 'error'); }
     },
 
     async toggleProjectStop() {
@@ -2373,6 +2620,15 @@ function cairnApp() {
             }});
           }
         }
+        // verification → target (second edge class, decision #6/#12)
+        if (f.type === 'verification' && f.verifies && visibleFactIdSet.has(f.verifies)) {
+          edges.push({ data: {
+            id: `verifies_${f.id}_${f.verifies}`,
+            source: f.id, target: f.verifies,
+            label: f.effective_confidence || f.confidence || 'verifies',
+            status: 'verifies', edgeType: 'verifies',
+          }});
+        }
       }
       for (const intent of this.project.intents) {
         if (focusIds && intent.to && !focusIds.has(intent.to) && !intent.from.some(s => focusIds.has(s))) {
@@ -2457,6 +2713,7 @@ function cairnApp() {
 
         { selector: 'edge[status="concluded"]', style: { width:2,'line-color':'#6ee7b7','target-arrow-color':'#6ee7b7','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.9 }},
         { selector: 'edge[status="batch"]', style: { width:1,'line-color':'#cbd5e1','line-style':'dotted','line-dash-pattern':[3,5],'target-arrow-color':'#cbd5e1','target-arrow-shape':'none','curve-style':'bezier',label:'data(label)','font-size':'6px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-7,'text-max-width':'60px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.7,'text-background-padding':'1px' }},
+        { selector: 'edge[status="verifies"]', style: { width:2.5,'line-color':'#10b981','line-style':'solid','target-arrow-color':'#10b981','target-arrow-shape':'triangle-backcurve','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#059669','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#ecfdf5','text-background-opacity':0.9,'text-background-padding':'2px','arrow-scale':1.0 }},
         { selector: 'edge[status="in_progress"]', style: { width:2,'line-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'line-dash-offset':0,'target-arrow-color':'#fbbf24','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#b45309','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#fffbeb','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.9 }},
         { selector: 'edge[status="unclaimed"]', style: { width:1.5,'line-color':'#cbd5e1','line-style':'dashed','line-dash-pattern':[5,5],'target-arrow-color':'#cbd5e1','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.7 }},
         { selector: 'edge[status="bootstrap_pending"]', style: { width:2,'line-color':'#fdba74','line-style':'dashed','line-dash-pattern':[8,4],'line-dash-offset':0,'target-arrow-color':'#fdba74','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#c2410c','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'88px','text-wrap':'ellipsis','text-background-color':'#fff7ed','text-background-opacity':0.92,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.85 }},
@@ -3553,13 +3810,93 @@ function cairnApp() {
       return `${seconds}s`;
     },
 
+    emptyNewProject() {
+      return {
+        title: '', goal: '', bootstrap: true, hints: [{ content: '' }],
+        codebasePath: '', commit: '', baseUrl: '', credentialsRef: '',
+        allowlistText: '', originRaw: '',
+      };
+    },
+
+    canCreateProject() {
+      if (!this.newProject.title?.trim() || !this.newProject.goal?.trim()) return false;
+      if (this.newProject.originRaw?.trim()) return true;
+      return !!this.newProject.codebasePath?.trim();
+    },
+
+    onBaseUrlChange() {
+      const url = (this.newProject.baseUrl || '').trim();
+      if (!url) return;
+      // prefill allowlist from base_url host:port when empty
+      if ((this.newProject.allowlistText || '').trim()) return;
+      try {
+        const u = new URL(url.includes('://') ? url : `http://${url}`);
+        const host = u.hostname;
+        const port = u.port || (u.protocol === 'https:' ? '443' : '80');
+        const lines = port && port !== '80' && port !== '443'
+          ? [`${host}:${port}`, host]
+          : [host, `${host}:${port}`];
+        this.newProject.allowlistText = [...new Set(lines)].join('\n');
+      } catch (_) { /* ignore */ }
+    },
+
+    buildOriginJson() {
+      if (this.newProject.originRaw?.trim()) {
+        // validate shape lightly
+        const parsed = JSON.parse(this.newProject.originRaw);
+        if (!parsed || typeof parsed !== 'object' || !parsed.codebase) {
+          throw new Error('origin JSON must include codebase');
+        }
+        return JSON.stringify(parsed);
+      }
+      const path = (this.newProject.codebasePath || '').trim();
+      if (!path) throw new Error('codebase path is required');
+      const allowlist = (this.newProject.allowlistText || '')
+        .split(/[\n,]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+      const origin = {
+        codebase: {
+          path,
+          commit: (this.newProject.commit || '').trim() || null,
+        },
+        target: {
+          base_url: (this.newProject.baseUrl || '').trim() || null,
+          credentials_ref: (this.newProject.credentialsRef || '').trim() || null,
+        },
+        allowlist,
+      };
+      return JSON.stringify(origin);
+    },
+
+    extractPayloadBody(requestText) {
+      if (!requestText) return '';
+      const text = String(requestText);
+      const markers = ['payload_body=', 'payload_body:', '\n\n'];
+      for (const m of ['payload_body=']) {
+        const i = text.indexOf(m);
+        if (i >= 0) return text.slice(i + m.length).trim();
+      }
+      // last non-empty line often is body after headers
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      const bodyLike = lines.find(l => l.includes('!!python') || l.includes('CAIRN_POC') || l.includes('config=') || l.startsWith('{'));
+      return bodyLike || '';
+    },
+
     async createProject() {
       try {
         const actor = this.actorName();
         const hintContents = this.newProject.hints.filter(h => h.content?.trim());
+        let origin;
+        try {
+          origin = this.buildOriginJson();
+        } catch (err) {
+          this.showToast(err.message || 'invalid origin', 'error');
+          return;
+        }
         const body = {
           title: this.newProject.title,
-          origin: this.newProject.origin,
+          origin,
           goal: this.newProject.goal,
           bootstrap_enabled: this.newProject.bootstrap
         };
@@ -3567,7 +3904,7 @@ function cairnApp() {
         if (hints.length > 0) body.hints = hints;
         const data = await this.api('POST', '/projects', body);
         this.showNewProject = false;
-        this.newProject = { title:'', origin:'', goal:'', bootstrap: true, hints: [{ content:'' }] };
+        this.newProject = this.emptyNewProject();
         await this.loadProjects();
         await this.openProject(data.project.id);
         this.showToast('Project created');

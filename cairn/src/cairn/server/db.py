@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS intents (
     last_heartbeat_at TEXT,
     created_at TEXT NOT NULL,
     concluded_at TEXT,
+    task_kind TEXT,
+    poc_brief TEXT,
+    fire_status TEXT,
     PRIMARY KEY (id, project_id)
 );
 
@@ -94,6 +97,26 @@ CREATE TABLE IF NOT EXISTS base_knowledge (
     data TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS verify_controls (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    kill_requested INTEGER NOT NULL DEFAULT 0,
+    kill_requested_at TEXT,
+    kill_actor TEXT,
+    kill_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS proxy_traffic (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    intent_id TEXT,
+    request TEXT NOT NULL,
+    response TEXT,
+    baseline TEXT,
+    status TEXT NOT NULL DEFAULT 'recorded',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id)
+);
 """
 
 
@@ -107,7 +130,9 @@ def configure(path: Path) -> None:
         conn.executescript(SCHEMA)
         _ensure_project_columns(conn)
         _ensure_fact_columns(conn)
+        _ensure_intent_columns(conn)
         _ensure_base_knowledge_table(conn)
+        _ensure_verify_tables(conn)
 
 
 def _ensure_base_knowledge_table(conn: sqlite3.Connection) -> None:
@@ -142,10 +167,48 @@ def _ensure_fact_columns(conn: sqlite3.Connection) -> None:
         ("verifies", "TEXT"),
         ("intent_id", "TEXT"),
         ("batch_id", "TEXT"),
+        ("oracle_draft", "TEXT"),
+        ("payload_draft", "TEXT"),
     ]
     for col_name, col_type in new_columns:
         if col_name not in columns:
             conn.execute(f"ALTER TABLE facts ADD COLUMN {col_name} {col_type}")
+
+
+def _ensure_intent_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(intents)")}
+    for col_name, col_type in (
+        ("task_kind", "TEXT"),
+        ("poc_brief", "TEXT"),
+        ("fire_status", "TEXT"),
+    ):
+        if col_name not in columns:
+            conn.execute(f"ALTER TABLE intents ADD COLUMN {col_name} {col_type}")
+
+
+def _ensure_verify_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS verify_controls (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            kill_requested INTEGER NOT NULL DEFAULT 0,
+            kill_requested_at TEXT,
+            kill_actor TEXT,
+            kill_reason TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS proxy_traffic (
+            id TEXT NOT NULL,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            intent_id TEXT,
+            request TEXT NOT NULL,
+            response TEXT,
+            baseline TEXT,
+            status TEXT NOT NULL DEFAULT 'recorded',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (id, project_id)
+        )"""
+    )
 
 
 @contextmanager

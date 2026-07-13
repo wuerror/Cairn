@@ -200,12 +200,64 @@ class CairnClient:
             json={"from": from_ids, "description": description, "worker": worker},
         )
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
+    def create_intent(
+        self,
+        project_id: str,
+        from_ids: list[str],
+        description: str,
+        creator: str,
+        *,
+        task_kind: str | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {
+            "from": from_ids,
+            "description": description,
+            "creator": creator,
+            "worker": None,
+        }
+        if task_kind is not None:
+            payload["task_kind"] = task_kind
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents",
-            json={"from": from_ids, "description": description, "creator": creator, "worker": None},
+            json=payload,
         )
+
+    def get_verify_control(self, project_id: str) -> dict:
+        response = self._session().get(
+            self._url(f"/projects/{project_id}/verify/control"),
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def kill_verify(self, project_id: str, *, actor: str = "dispatcher", reason: str = "kill-switch") -> dict:
+        response = self._session().post(
+            self._url(f"/projects/{project_id}/verify/kill"),
+            json={"actor": actor, "reason": reason},
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def record_proxy_traffic(
+        self,
+        project_id: str,
+        *,
+        intent_id: str | None,
+        request: str,
+        response: str | None = None,
+        baseline: str | None = None,
+        status: str = "recorded",
+    ) -> ApiResult:
+        payload: dict[str, Any] = {"request": request or " ", "status": status}
+        if intent_id is not None:
+            payload["intent_id"] = intent_id
+        if response is not None:
+            payload["response"] = response
+        if baseline is not None:
+            payload["baseline"] = baseline
+        return self._request_json("POST", f"/projects/{project_id}/verify/proxy_traffic", json=payload)
 
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
         try:

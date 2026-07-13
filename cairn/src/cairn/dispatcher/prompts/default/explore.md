@@ -32,8 +32,10 @@ You may also return a single observation:
 - `locations` is a list of `file:line` strings pinpointing the code evidence. Be precise.
 - `description` should clearly state the key objective result. Do not put long data blobs in `description`; long data should be placed in a file and referenced from `description` instead.
 - `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
-- When useful for PoC verification planning, include an `oracle_draft` field with a suggestion for what success would look like (e.g., "OOB HTTP callback with unique token").
+- When useful for PoC verification planning, include an `oracle_draft` field with a suggestion for what success would look like (e.g., "OOB HTTP callback with unique token" or the marker string `CAIRN_POC_OK`).
+- When a sink looks exploitable, also include a `payload_draft` string: the suggested HTTP body / form field values that could trigger it (not a full attack framework). Prefer concrete body content over prose.
 - If the graph includes `base_knowledge` and your findings contradict an entry, emit `base_knowledge_patches` with the existing `entry_id`. Only fill `statement` / `evidence` / `confidence` (`assumed` or `code-confirmed`). Never fill `revised_by`, `version`, or claim `live-confirmed`.
+- Codebase is mounted read-only at `{codebase_mount_path}`. Use paths relative to that root for `locations` as `file:line` (host path for operators only: `{codebase_host_path}`).
 
 # Context
 ## Graph
@@ -49,4 +51,9 @@ You may also return a single observation:
 ## Current Intent Description
 ```
 {intent_description}
+```
+
+## Codebase mount
+```
+{codebase_mount_path}
 ```

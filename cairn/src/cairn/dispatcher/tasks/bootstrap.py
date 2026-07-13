@@ -17,7 +17,9 @@ from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
     best_effort_release,
     cancel_reason,
+    codebase_prompt_replacements,
     did_timeout,
+    ensure_static_container,
     project_allows_conclude_fallback,
     preview,
     run_healthcheck,
@@ -47,7 +49,17 @@ def run_bootstrap_task(
     lease = HeartbeatLease.for_intent(client, project.project.id, intent.id, worker.name, config.runtime.interval)
     lease.start()
     try:
-        container_name = container_manager.ensure_running(project.project.id)
+        container_name, mount_err = ensure_static_container(config, container_manager, project)
+        if mount_err or not container_name:
+            LOG.error(
+                "bootstrap failed: codebase mount project=%s intent=%s worker=%s error=%s",
+                project.project.id,
+                intent.id,
+                worker.name,
+                mount_err or "container unavailable",
+            )
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "failed"
 
         if task_healthcheck_enabled(config):
             LOG.info(
@@ -101,7 +113,7 @@ def run_bootstrap_task(
 
         prompt = render_prompt(
             load_prompt(config.runtime.prompt_group, "bootstrap.md"),
-            _bootstrap_prompt_replacements(project),
+            _bootstrap_prompt_replacements(config, project),
         )
 
         session = driver.prepare_session()
@@ -295,11 +307,20 @@ def _try_conclude_fallback(
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
 
-    container_name = container_manager.ensure_running(project.project.id)
+    container_name, mount_err = ensure_static_container(config, container_manager, project)
+    if mount_err or not container_name:
+        LOG.error(
+            "bootstrap conclude failed: codebase mount project=%s intent=%s error=%s",
+            project.project.id,
+            intent.id,
+            mount_err or "container unavailable",
+        )
+        best_effort_release(client, project.project.id, intent.id, worker.name)
+        return "failed"
 
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "bootstrap_conclude.md"),
-        _bootstrap_prompt_replacements(project),
+        _bootstrap_prompt_replacements(config, project),
     )
     conclude_argv = driver.build_conclude(worker, prompt, session)
     LOG.info("starting bootstrap conclude fallback project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
@@ -401,7 +422,7 @@ def _try_conclude_fallback(
     return status
 
 
-def _bootstrap_prompt_replacements(project: ProjectDetail) -> dict[str, str]:
+def _bootstrap_prompt_replacements(config: DispatchConfig, project: ProjectDetail) -> dict[str, str]:
     facts = {fact.id: fact.description for fact in project.facts}
     hints = [
         {
@@ -416,6 +437,7 @@ def _bootstrap_prompt_replacements(project: ProjectDetail) -> dict[str, str]:
         "origin": facts.get("origin", ""),
         "goal": facts.get("goal", ""),
         "hints": format_hints(hints),
+        **codebase_prompt_replacements(config, project),
     }
 
 

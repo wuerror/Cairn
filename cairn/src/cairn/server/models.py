@@ -26,6 +26,8 @@ class Fact(BaseModel):
     verifies: str | None = None
     intent_id: str | None = None
     batch_id: str | None = None
+    oracle_draft: str | None = None
+    payload_draft: str | None = None
     effective_confidence: ConfidenceLevel | None = None
     stale: bool = False
 
@@ -36,6 +38,34 @@ class Observation(BaseModel):
     locations: list[str] | None = None
     evidence: str | None = None
     oracle_draft: str | None = None
+    payload_draft: str | None = None
+    verifies: str | None = None
+    confidence: ConfidenceLevel | None = None
+    why_failed: dict | None = None
+
+
+class PoCBriefEntry(BaseModel):
+    endpoint: str
+    precondition: str = "none"
+
+
+class PoCBriefPayloadRecipe(BaseModel):
+    gadget: str | None = None
+    shape: str = ""
+
+
+class PoCBriefSuccessSignature(BaseModel):
+    kind: str = "response_match"
+    check: str = ""
+
+
+class PoCBrief(BaseModel):
+    chain: list[str] = Field(default_factory=list)
+    entry: PoCBriefEntry
+    dataflow: str = ""
+    payload_recipe: PoCBriefPayloadRecipe = Field(default_factory=PoCBriefPayloadRecipe)
+    success_signature: PoCBriefSuccessSignature = Field(default_factory=PoCBriefSuccessSignature)
+    constraints_to_bypass: list[str] = Field(default_factory=list)
 
 
 class Intent(BaseModel):
@@ -48,6 +78,9 @@ class Intent(BaseModel):
     last_heartbeat_at: str | None = None
     created_at: str
     concluded_at: str | None = None
+    task_kind: Literal["explore", "verify"] | None = None
+    poc_brief: PoCBrief | dict | None = None
+    fire_status: Literal["pending", "approved", "denied", "fired"] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -249,6 +282,7 @@ class CreateIntentRequest(BaseModel):
     description: str
     creator: str
     worker: str | None = None
+    task_kind: Literal["explore", "verify"] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -394,3 +428,64 @@ class ReopenResponse(BaseModel):
     project: ProjectMeta
     fact: Fact
     intent: Intent
+
+
+class FireApprovalRequest(BaseModel):
+    action: Literal["approve", "deny"]
+    actor: str = "human"
+
+    @field_validator("actor")
+    @classmethod
+    def validate_actor(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class KillVerifyRequest(BaseModel):
+    actor: str = "human"
+    reason: str = "kill-switch"
+
+    @field_validator("actor", "reason")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class VerifyControlState(BaseModel):
+    project_id: str
+    kill_requested: bool = False
+    kill_requested_at: str | None = None
+    kill_actor: str | None = None
+    kill_reason: str | None = None
+
+
+class ProxyTrafficEntry(BaseModel):
+    id: str
+    project_id: str
+    intent_id: str | None = None
+    request: str
+    response: str | None = None
+    baseline: str | None = None
+    created_at: str
+    status: Literal["recorded", "approved", "denied", "blocked"] = "recorded"
+
+
+class RecordProxyTrafficRequest(BaseModel):
+    intent_id: str | None = None
+    request: str
+    response: str | None = None
+    baseline: str | None = None
+    status: Literal["recorded", "approved", "denied", "blocked"] = "recorded"
+
+    @field_validator("request")
+    @classmethod
+    def validate_request(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text

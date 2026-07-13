@@ -20,7 +20,9 @@ from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
     best_effort_release_reason,
     cancel_reason,
+    codebase_prompt_replacements,
     did_timeout,
+    ensure_static_container,
     preview,
     run_healthcheck,
     run_worker_process,
@@ -48,7 +50,15 @@ def run_reason_task(
     lease = HeartbeatLease.for_reason(client, project.project.id, worker.name, config.runtime.interval)
     lease.start()
     try:
-        container_name = container_manager.ensure_running(project.project.id)
+        container_name, mount_err = ensure_static_container(config, container_manager, project)
+        if mount_err or not container_name:
+            LOG.error(
+                "reason failed: codebase mount project=%s worker=%s error=%s",
+                project.project.id,
+                worker.name,
+                mount_err or "container unavailable",
+            )
+            return "failed"
 
         if task_healthcheck_enabled(config):
             LOG.info(
@@ -144,6 +154,7 @@ def run_reason_task(
                 "fact_ids": format_fact_ids(allowed_fact_ids),
                 "open_intents": format_open_intents(open_intents),
                 "max_intents": str(config.tasks.reason.max_intents),
+                **codebase_prompt_replacements(config, project),
             },
         )
 
@@ -259,7 +270,14 @@ def run_reason_task(
         if kind == "intents":
             created = 0
             for intent_data in data:
-                response = client.create_intent(project.project.id, intent_data["from"], intent_data["description"], worker.name)
+                task_kind = intent_data.get("task_kind")
+                response = client.create_intent(
+                    project.project.id,
+                    intent_data["from"],
+                    intent_data["description"],
+                    worker.name,
+                    task_kind=task_kind if task_kind in ("explore", "verify") else None,
+                )
                 if response.status_code == 403:
                     LOG.info("project became inactive during reason intent create project=%s worker=%s created=%s", project.project.id, worker.name, created)
                     return "success"

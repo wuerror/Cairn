@@ -124,11 +124,24 @@ class InProcessClient:
             {"from": from_ids, "description": description, "worker": worker},
         )
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
-        return self._post(
-            f"/projects/{project_id}/intents",
-            {"from": from_ids, "description": description, "creator": creator, "worker": None},
-        )
+    def create_intent(
+        self,
+        project_id: str,
+        from_ids: list[str],
+        description: str,
+        creator: str,
+        *,
+        task_kind: str | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {
+            "from": from_ids,
+            "description": description,
+            "creator": creator,
+            "worker": None,
+        }
+        if task_kind is not None:
+            payload["task_kind"] = task_kind
+        return self._post(f"/projects/{project_id}/intents", payload)
 
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)
@@ -194,8 +207,16 @@ class LocalContainerManager:
     def container_name(self, project_id: str) -> str:
         return f"local-{project_id}"
 
-    def ensure_running(self, project_id: str) -> str:
+    def ensure_running(self, project_id: str, profile: str = "static", **_kwargs) -> str:
+        if profile == "verify":
+            return f"local-{project_id}-verify"
         return self.container_name(project_id)
+
+    def remove_container(self, name: str, *, force: bool = True) -> None:
+        return None
+
+    def destroy_verify_containers(self, project_id: str) -> int:
+        return 0
 
     def build_exec_process(
         self,
